@@ -325,6 +325,10 @@ class Baselines {
     final sigma = math.max(1.253 * state.spread, 1e-9);
     final z = (value - state.baseline) / sigma;
     final delta = value - state.baseline;
+    // ponytail: silent 0.0 fallback if baseline is ever exactly 0 — every
+    // metricCfg today has minVal > 0 so update() can never seed a zero
+    // baseline; revisit (make ratio nullable) before adding a metric whose
+    // range legitimately crosses zero.
     final ratio = state.baseline != 0 ? (value / state.baseline - 1.0) : 0.0;
     return Deviation(
         z: z, delta: delta, ratio: ratio, inNormalRange: z.abs() <= 1.0);

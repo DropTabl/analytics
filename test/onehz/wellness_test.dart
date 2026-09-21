@@ -176,6 +176,23 @@ void main() {
       expect(m.present, isFalse);
       expect(m.confidence, 0);
     });
+
+    test(
+        'nonparam is withheld (not a fabricated 0.0) on a flat/'
+        'zero-variance series', () {
+      // 3 days of an identical ADC reading -> varTot == 0 and diffN's
+      // squared-difference sum == 0. IS/IV are both undefined divisions by
+      // zero here, not "perfectly stable / perfectly regular" measurements.
+      // The cosinor half can still fit a (degenerate) phase on flat input,
+      // so the overall Metric stays present — it's specifically `nonparam`
+      // that must come back null instead of IS=0.0/IV=0.0.
+      final samples = <AdcSample>[
+        for (var i = 0; i < 3 * 24 * 6; i++)
+          AdcSample(i * 10 * 60 * 1000.0, 2000.0),
+      ];
+      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      expect(m.value!.nonparam, isNull);
+    });
   });
 
   // -------------------------------------------------------------------------

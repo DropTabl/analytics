@@ -356,8 +356,13 @@ CircadianNonparam? _nonparam(
     final d = v - grand;
     varTot += d * d;
   }
+  // A flat/quantized-ADC window has zero total variance and zero
+  // consecutive-difference energy — IS and IV are both undefined divisions
+  // by zero there, not "perfectly stable" 0.0 readings (matches
+  // circadian_np.dart's `if (ssTot == 0) return absent` discipline).
+  if (varTot == 0 || diffN == 0) return null;
   final p = present.length;
-  final iv = (diffN > 0 && varTot > 0) ? (diffSq / diffN) / (varTot / p) : 0.0;
+  final iv = (diffSq / diffN) / (varTot / p);
 
   // IS: between-day stability. Average each within-day epoch-of-day across days,
   // then variance-of-the-24h-profile / total variance.
@@ -393,7 +398,7 @@ CircadianNonparam? _nonparam(
     // circadian_np.dart's `p = epochsPerDay` normalization.
     profVar /= epochsPerDay;
   }
-  final double is_ = varTot > 0 ? (profVar / (varTot / p)).clamp(0, 1) : 0.0;
+  final double is_ = (profVar / (varTot / p)).clamp(0, 1);
 
   // M10 / L5 / RA are DELIBERATELY NOT COMPUTED. See the file header: the temp
   // series that survives retention is median-centred, so it is signed, and
