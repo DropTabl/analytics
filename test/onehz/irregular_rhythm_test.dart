@@ -112,6 +112,30 @@ void main() {
       expect(m.value!.flag, isFalse);
     });
 
+    test('beats either side of a time hole are not differenced', () {
+      // correctRr hands over a compacted series whose clock skips dropped runs
+      // and dropouts. Steady 1000 / 600 ms stretches split by 60 s holes: the
+      // only big jumps are across the holes, so SD1 and pNN70 must stay tiny.
+      final rr = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var s = 0; s < 40; s++) {
+        final base = s.isEven ? 1000.0 : 600.0;
+        t += 60000;
+        for (var i = 0; i < 60; i++) {
+          final v = base + 5 * math.sin(i / 3);
+          t += v;
+          rr.add(v);
+          times.add(t);
+        }
+      }
+      final m = irregularBeatScreen(rr, nnTimesMs: times);
+      expect(m.present, isTrue);
+      expect(m.value!.pnnPct, 0);
+      expect(m.value!.sd1, lessThan(10));
+      expect(m.value!.flag, isFalse);
+    });
+
     test('mismatched nnTimesMs length falls back to the whole-span verdict '
         'instead of crashing', () {
       final rnd = math.Random(7);
