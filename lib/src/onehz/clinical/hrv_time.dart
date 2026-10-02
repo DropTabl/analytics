@@ -12,19 +12,31 @@
 //
 // That warning used to be advice only: every RMSSD in this file shipped, at
 // confidence 0.95, however much of it was beat-timing jitter. [kNnDiffAcf1Floor]
-// makes it behaviour — see that constant for the measurement and the threshold.
+// makes it behaviour as a cheap SCREEN; when it trips, [nnJitter]'s beat-indexed
+// spectrum ARBITRATES, because respiratory sinus arrhythmia at a low heart rate
+// trips the screen too (see [kNnDiffAcf1Floor] and `_judgeJitter`).
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
 import '../util.dart';
+import '../respiration/resp_rate.dart' show respLoHz, respHiHz;
 
 /// Lag-1 ACF floor for the NN successive-difference series, below which RMSSD
-/// and pNN50 are REFUSED (SDNN / SDANN survive it and are the honest lead).
+/// and pNN50 are REFUSED unless the spectrum shows the differences are
+/// breathing (SDNN / SDANN survive either way and are the honest lead).
 ///
-/// Differencing a smooth tachogram leaves ACF1 near 0; differencing white noise
-/// leaves exactly −0.5. So ACF1 measures, per night and from the series already
-/// in hand, how much of the "variability" is beat-timing jitter rather than
-/// physiology. It is deliberately the gate INSTEAD of a per-family constant
+/// Differencing white noise leaves ACF1 at exactly −0.5, and a tachogram whose
+/// differences are uncorrelated leaves it near 0; with a white share s of the
+/// MSSD on top of such physiology, ACF1 = −s/2, so −0.35 means "≥ 70 % jitter".
+/// That premise does NOT hold for respiratory sinus arrhythmia: RSA is a
+/// sinusoid in beat index at b = breaths per beat, and its differences have
+/// ACF1 = cos(2π·b) — below −0.35 once b > 0.307 (HR 48 at 16 br/min, HR 45 at
+/// 14), and exactly −0.5, the white-noise value, at b = 1/3. ACF1 is therefore
+/// only the cheap SCREEN; when it trips, `_judgeJitter` asks [nnJitter] for the
+/// white share directly and keeps a night whose differences are one breathing
+/// peak over a floor carrying ≤ [kJitterShareCeiling] of the MSSD. It is
+/// deliberately the gate INSTEAD of a per-family constant
 /// (`device.dart`): the sensor difference is real and large, but it reaches us
 /// as something measurable, not as a label — a strap that starts reporting
 /// cleaner beats is believed the night it does so, and an unknown strap is
@@ -78,11 +90,225 @@ double? nnDiffAcf1(List<List<double>> diffRuns) {
 double _acf1Quality(double? acf1) =>
     acf1 == null ? 1.0 : (1 - acf1 / kNnDiffAcf1Floor).clamp(0.0, 1.0);
 
-String _jitterNote(double acf1) =>
-    'rmssd_refused:acf1=${acf1.toStringAsFixed(3)} — the NN successive '
-    'differences are essentially differenced white noise (−0.5 = pure, floor '
-    '$kNnDiffAcf1Floor), so RMSSD/pNN50 would measure beat-timing jitter, not '
-    'vagal tone';
+String _jitterNote(double acf1, [NnJitter? j]) =>
+    'rmssd_refused:acf1=${acf1.toStringAsFixed(3)}'
+    '${j == null ? '' : ',jitter_share=${j.share.toStringAsFixed(3)}'} — the '
+    'NN successive differences are essentially differenced white noise (−0.5 '
+    '= pure, floor $kNnDiffAcf1Floor)'
+    '${j == null ? '' : ' and a flat floor carries ${(100 * j.share).toStringAsFixed(1)} % of their power'}'
+    ', so RMSSD/pNN50 would measure beat-timing jitter, not vagal tone';
+
+String _rsaKeptNote(double acf1, NnJitter j) =>
+    'ACF1 ${acf1.toStringAsFixed(3)} is below the jitter floor, but the '
+    'successive differences are a single respiratory peak '
+    '(${(j.peakHz! * 60).toStringAsFixed(1)} br/min) over a flat floor carrying '
+    '${(100 * j.share).toStringAsFixed(1)} % of the MSSD — RSA, not jitter; '
+    'RMSSD kept';
+
+/// Beats per Welch segment for [nnJitter]'s beat-indexed spectrum, and the hop
+/// (50 % overlap, Welch 1967). Indexed by BEAT, not time: jitter is per beat and
+/// RMSSD is a per-beat statistic, so cycles-per-beat is the natural axis.
+const int _jitSegBeats = 64;
+const int _jitSegStep = 32;
+
+/// Fewest Welch segments [nnJitter] will judge on (~544 contiguous beats, ~9–11
+/// min asleep). Below it the floor estimate is too noisy to overrule the screen
+/// (white noise at 8 segments: share p1 0.72; at 17: p1 0.81), so the ACF1
+/// verdict stands unchanged.
+const int kJitterMinSegments = 16;
+
+/// The white-floor share of the MSSD above which RMSSD/pNN50 are refused. NOT a
+/// new knob: under the floor's own premise (uncorrelated physiological
+/// differences) ACF1 = −s/2, so −0.35 already meant s = 0.70. This measures s
+/// instead of inferring it from one lag.
+const double kJitterShareCeiling = 0.7;
+
+/// Search band for the dominant HF peak and the floor, cycles/beat. Below 0.1
+/// the LF/VLF physiology lives; differencing barely passes it anyway.
+const double _jitLoCpb = 0.1;
+
+/// Bins excluded either side of the dominant peak when reading the floor.
+const int _jitPeakHalfWidth = 3;
+
+/// A peak above this sits in the top two bins (≥ 0.47 cycles/beat): a
+/// beat-to-beat ALTERNATION (detector artefact, bigeminy), not resolvable RSA.
+/// Same reasoning as rsaRespRate refusing a peak at its own ceiling.
+const double _jitMaxPeakCpb = 0.47;
+
+/// The night's beat-timing jitter, measured from the spectrum's SHAPE.
+class NnJitter {
+  /// Estimated fraction of the MSSD explained by a flat (white) floor, 0..1.
+  final double share;
+
+  /// Dominant peak in [0.1, 0.5] cycles/beat.
+  final double peakCpb;
+
+  /// The same peak in Hz (peakCpb / median NN in s); null if NN is degenerate.
+  final double? peakHz;
+  final int segments;
+  const NnJitter({
+    required this.share,
+    required this.peakCpb,
+    this.peakHz,
+    required this.segments,
+  });
+  Map<String, dynamic> toJson() => {
+        'jitter_share': round6(share),
+        'jitter_peak_cpb': round6(peakCpb),
+        if (peakHz != null) 'jitter_peak_hz': round6(peakHz!),
+        'jitter_segments': segments,
+      };
+}
+
+const int _jitBins = _jitSegBeats ~/ 2 + 1;
+final Float64List _jitHann = Float64List.fromList([
+  for (var k = 0; k < _jitSegBeats; k++)
+    0.5 - 0.5 * math.cos(2 * math.pi * k / (_jitSegBeats - 1))
+]);
+// DFT kernel, row k = bin, column j = beat: cos/sin(2π·k·j/64).
+final Float64List _jitCos = Float64List.fromList([
+  for (var k = 0; k < _jitBins; k++)
+    for (var j = 0; j < _jitSegBeats; j++)
+      math.cos(2 * math.pi * ((k * j) % _jitSegBeats) / _jitSegBeats)
+]);
+final Float64List _jitSin = Float64List.fromList([
+  for (var k = 0; k < _jitBins; k++)
+    for (var j = 0; j < _jitSegBeats; j++)
+      math.sin(2 * math.pi * ((k * j) % _jitSegBeats) / _jitSegBeats)
+]);
+
+/// White (beat-timing) share of the MSSD, from a beat-indexed Welch spectrum.
+///
+/// White NN noise of variance σ² puts power σ² at EVERY beat frequency up to
+/// the beat Nyquist (0.5 cycles/beat) and contributes exactly 2σ² to the MSSD;
+/// beat-TIME jitter is broadband too. Respiratory sinus arrhythmia is one
+/// narrow peak at the breathing frequency (Hirsch & Bishop 1981), and timing
+/// quantisation adds a broadband floor (Merri et al. 1990). So
+/// `share = 2·median(PSD over 0.1–0.5 cycles/beat, peak ±3 bins excluded) /
+/// MSSD` estimates the jitter fraction from the spectrum's shape, which no
+/// single autocorrelation lag can (at b = 1/3 pure RSA and pure noise share
+/// ACF1 = −0.5).
+///
+/// [nnRuns] are contiguous LEVEL runs (NN values of beats adjacent in time — a
+/// seam starts a new run). Welch 1967: 64-beat Hann segments, 50 % overlap,
+/// each linearly detrended; a segment never crosses a run boundary. The MSSD is
+/// pooled over exactly the within-run differences. Null when fewer than
+/// [kJitterMinSegments] segments fit, or the MSSD is zero.
+NnJitter? nnJitter(List<List<double>> nnRuns) {
+  const nb = _jitBins;
+  final acc = Float64List(nb);
+  var w2 = 0.0;
+  for (final w in _jitHann) {
+    w2 += w * w;
+  }
+  const tb = (_jitSegBeats - 1) / 2.0;
+  var tt = 0.0;
+  for (var i = 0; i < _jitSegBeats; i++) {
+    tt += (i - tb) * (i - tb);
+  }
+  final y = Float64List(_jitSegBeats);
+  var segments = 0;
+  var ssd = 0.0;
+  var nd = 0;
+  final levels = <double>[];
+  for (final run in nnRuns) {
+    levels.addAll(run);
+    for (var i = 1; i < run.length; i++) {
+      final d = run[i] - run[i - 1];
+      ssd += d * d;
+      nd++;
+    }
+    for (var s = 0; s + _jitSegBeats <= run.length; s += _jitSegStep) {
+      var mu = 0.0;
+      for (var i = 0; i < _jitSegBeats; i++) {
+        mu += run[s + i];
+      }
+      mu /= _jitSegBeats;
+      var sl = 0.0;
+      for (var i = 0; i < _jitSegBeats; i++) {
+        sl += (i - tb) * (run[s + i] - mu);
+      }
+      sl /= tt;
+      for (var i = 0; i < _jitSegBeats; i++) {
+        y[i] = (run[s + i] - mu - sl * (i - tb)) * _jitHann[i];
+      }
+      for (var k = 0; k < nb; k++) {
+        var re = 0.0, im = 0.0;
+        final row = k * _jitSegBeats;
+        for (var j = 0; j < _jitSegBeats; j++) {
+          re += y[j] * _jitCos[row + j];
+          im += y[j] * _jitSin[row + j];
+        }
+        acc[k] += (re * re + im * im) / w2;
+      }
+      segments++;
+    }
+  }
+  if (segments < kJitterMinSegments || nd == 0) return null;
+  final mssd = ssd / nd;
+  if (mssd <= 0) return null;
+  final psd = [for (final a in acc) a / segments];
+  final kLo = (_jitLoCpb * _jitSegBeats).ceil();
+  const kHi = _jitSegBeats ~/ 2;
+  var kPk = kLo;
+  for (var k = kLo + 1; k <= kHi; k++) {
+    if (psd[k] > psd[kPk]) kPk = k;
+  }
+  final floorBins = [
+    for (var k = kLo; k <= kHi; k++)
+      if ((k - kPk).abs() > _jitPeakHalfWidth) psd[k]
+  ];
+  final floor = median(floorBins)!;
+  final peakCpb = kPk / _jitSegBeats;
+  final medNn = median(levels);
+  return NnJitter(
+    share: (2 * floor / mssd).clamp(0.0, 1.0),
+    peakCpb: peakCpb,
+    peakHz: (medNn != null && medNn > 0) ? peakCpb / (medNn / 1000.0) : null,
+    segments: segments,
+  );
+}
+
+/// One jitter verdict, shared by every RMSSD in this file.
+class _JitterVerdict {
+  final bool refused;
+
+  /// Confidence multiplier; [_acf1Quality] whenever the screen does not trip.
+  final double quality;
+
+  /// Diagnostic, emitted whenever measurable.
+  final NnJitter? jitter;
+  final String? note;
+  const _JitterVerdict(this.refused, this.quality, this.jitter, this.note);
+}
+
+/// ACF1 screens; the spectrum arbitrates only what the screen would refuse, so
+/// the set of refused nights can only SHRINK and a night at ACF1 ≥ −0.35 is
+/// judged exactly as before. Kept when the differences are one breathing peak
+/// ([respLoHz]–[respHiHz], below [_jitMaxPeakCpb]) over a white floor carrying
+/// ≤ [kJitterShareCeiling] of the MSSD; refused otherwise, and refused as
+/// before when there are too few segments to judge.
+_JitterVerdict _judgeJitter(double? acf1, List<List<double>> nnRuns) {
+  final j = nnJitter(nnRuns);
+  if (acf1 == null || acf1 >= kNnDiffAcf1Floor) {
+    return _JitterVerdict(false, _acf1Quality(acf1), j, null);
+  }
+  final breathing = j != null &&
+      j.share <= kJitterShareCeiling &&
+      j.peakCpb <= _jitMaxPeakCpb &&
+      j.peakHz != null &&
+      j.peakHz! >= respLoHz &&
+      j.peakHz! <= respHiHz;
+  if (breathing) {
+    return _JitterVerdict(
+      false,
+      (1 - j.share / kJitterShareCeiling).clamp(0.0, 1.0),
+      j,
+      _rsaKeptNote(acf1, j),
+    );
+  }
+  return _JitterVerdict(true, 0.0, j, _jitterNote(acf1, j));
+}
 
 class HrvTime {
   final double? rmssd; // ms
@@ -92,6 +318,7 @@ class HrvTime {
   final double? pnn50; // %
   final int nBeats;
   final double? diffAcf1; // lag-1 ACF of the NN successive differences
+  final double? jitterShare; // [nnJitter] white share of the MSSD
   const HrvTime({
     this.rmssd,
     this.sdnn,
@@ -100,6 +327,7 @@ class HrvTime {
     this.pnn50,
     required this.nBeats,
     this.diffAcf1,
+    this.jitterShare,
   });
   Map<String, dynamic> toJson() => {
         if (rmssd != null) 'rmssd_ms': round6(rmssd!),
@@ -109,6 +337,7 @@ class HrvTime {
         if (pnn50 != null) 'pnn50_pct': round6(pnn50!),
         'n_beats': nBeats,
         if (diffAcf1 != null) 'diff_acf1': round6(diffAcf1!),
+        if (jitterShare != null) 'jitter_share': round6(jitterShare!),
       };
 }
 
@@ -121,7 +350,8 @@ class HrvTime {
 /// the upstream corrector rejected (0..1), folded into confidence exactly as
 /// `hrvFreq` and `irregularBeatScreen` already do. Returns an absent Metric when
 /// there are too few beats; RMSSD/pNN50 alone go null when the successive
-/// differences fail [kNnDiffAcf1Floor].
+/// differences fail [kNnDiffAcf1Floor] and the spectrum does not show them to
+/// be breathing (`_judgeJitter`).
 Metric<HrvTime> hrvTime(
   List<double> nnMs, {
   List<double>? nnTimesMs,
@@ -146,20 +376,28 @@ Metric<HrvTime> hrvTime(
   //
   // The differences are kept as contiguous RUNS (a seam ends a run) so the same
   // pass feeds [nnDiffAcf1] without ever forming a lag-1 pair across a hole.
+  // The same seams cut the LEVEL runs [nnJitter] reads, so no Welch segment
+  // spans a dropout either.
   final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
   final runs = <List<double>>[];
+  final levelRuns = <List<double>>[];
   var run = <double>[];
+  var level = <double>[nnMs[0]];
   for (var i = 1; i < nnMs.length; i++) {
     if (gapAware && nnTimesMs[i] - nnTimesMs[i - 1] > nnMs[i] + 0.5) {
       if (run.isNotEmpty) {
         runs.add(run);
         run = <double>[];
       }
+      levelRuns.add(level);
+      level = <double>[nnMs[i]];
       continue;
     }
     run.add(nnMs[i] - nnMs[i - 1]);
+    level.add(nnMs[i]);
   }
   if (run.isNotEmpty) runs.add(run);
+  levelRuns.add(level);
 
   var ssd = 0.0;
   var nn50 = 0;
@@ -177,7 +415,8 @@ Metric<HrvTime> hrvTime(
   // the audit corpus) — they keep publishing, which is what the header has
   // always advised.
   final acf1 = nnDiffAcf1(runs);
-  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
+  final verdict = _judgeJitter(acf1, levelRuns);
+  final jittery = verdict.refused;
   final rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
   final pnn50 = (pairs > 0 && !jittery) ? 100.0 * nn50 / pairs : null;
   final sdnn = stddev(nnMs);
@@ -202,7 +441,7 @@ Metric<HrvTime> hrvTime(
   // swallow any penalty and re-clamp to 0.95 regardless.
   final conf = ((nnMs.length / 250.0).clamp(0.0, 1.0) // ~250 beats ≈ 5 min
           *
-          _acf1Quality(acf1) *
+          verdict.quality *
           (1 - artifactFraction))
       .clamp(0.3, 0.95);
   return Metric<HrvTime>(
@@ -214,15 +453,17 @@ Metric<HrvTime> hrvTime(
       pnn50: pnn50,
       nBeats: nnMs.length,
       diffAcf1: acf1,
+      jitterShare: verdict.jitter?.share,
     ),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
     note: jittery
-        ? '${_jitterNote(acf1)}. SDNN/SDANN survive it and are the lead here. '
+        ? '${verdict.note}. SDNN/SDANN survive it and are the lead here. '
             'PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
-            '— lead with SDNN/SDANN',
+            '— lead with SDNN/SDANN'
+            '${verdict.note == null ? '' : '. ${verdict.note}'}',
   );
 }
 
@@ -244,7 +485,8 @@ Metric<HrvTime> hrvTime(
 ///
 /// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
 /// PRV-not-ECG honesty note. Absent when there are too few usable windows, or
-/// when the night's successive differences fail [kNnDiffAcf1Floor]. A window
+/// when the night's successive differences fail [kNnDiffAcf1Floor] and the
+/// spectrum does not show them to be breathing (`_judgeJitter`). A window
 /// contributes only if it holds [minBeatsPerWindow] differences between beats
 /// that are ADJACENT IN TIME, not merely adjacent in the compacted NN list.
 Metric<double> nocturnalRmssd(
@@ -280,6 +522,7 @@ Metric<double> nocturnalRmssd(
   // passed by luck — measured, that let WHOOP 5 publish 109-116 ms from its
   // calmest-looking windows while the night pooled to −0.43/−0.51.
   final runs = <List<double>>[];
+  final levelRuns = <List<double>>[]; // same seams, NN levels — [nnJitter]
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     if (stageMaskPerSec != null) {
@@ -295,7 +538,9 @@ Metric<double> nocturnalRmssd(
     // apart than the interval itself sits either side of a dropped run, and
     // differencing across it manufactures one large difference per hole.
     final winRuns = <List<double>>[];
+    final winLevels = <List<double>>[];
     var run = <double>[];
+    var level = <double>[nnMs[seg[0]]];
     for (var k = 1; k < seg.length; k++) {
       final i = seg[k], p = seg[k - 1];
       if (nnTimesMs[i] - nnTimesMs[p] > nnMs[i] + 0.5) {
@@ -303,11 +548,15 @@ Metric<double> nocturnalRmssd(
           winRuns.add(run);
           run = <double>[];
         }
+        winLevels.add(level);
+        level = <double>[nnMs[i]];
         continue;
       }
       run.add(nnMs[i] - nnMs[p]);
+      level.add(nnMs[i]);
     }
     if (run.isNotEmpty) winRuns.add(run);
+    winLevels.add(level);
     var ssd = 0.0;
     var nd = 0;
     for (final r in winRuns) {
@@ -318,14 +567,16 @@ Metric<double> nocturnalRmssd(
     }
     if (nd < minBeatsPerWindow) continue;
     runs.addAll(winRuns);
+    levelRuns.addAll(winLevels);
     rmssds.add(math.sqrt(ssd / nd));
   }
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
+  final verdict = _judgeJitter(acf1, levelRuns);
+  if (verdict.refused) {
     return Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: _jitterNote(acf1),
+      note: verdict.note,
     );
   }
   if (rmssds.isEmpty) {
@@ -339,7 +590,7 @@ Metric<double> nocturnalRmssd(
   // Confidence scales with how many windows we could median over, and with the
   // measured jitter level (see [kNnDiffAcf1Floor]).
   final conf =
-      ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1)).clamp(
+      ((rmssds.length / 12.0).clamp(0.0, 1.0) * verdict.quality).clamp(
           // 12 ≈ 1 h
           0.3,
           0.95);
@@ -350,8 +601,30 @@ Metric<double> nocturnalRmssd(
     inputs_used: inputs,
     note: 'robust nocturnal RMSSD = MEDIAN of ${rmssds.length} consecutive '
         '5-min-window RMSSDs (REM/arousal-robust). PRV not ECG-HRV; '
-        'RMSSD is quantization-sensitive at 1 Hz.',
+        'RMSSD is quantization-sensitive at 1 Hz.'
+        '${verdict.note == null ? '' : ' ${verdict.note}.'}',
   );
+}
+
+/// The nightly headline RMSSD plus the diagnostics a `Metric<double>` cannot
+/// carry. Present only when the headline is.
+class SessionRmssd {
+  final double rmssd; // ms — the headline
+  final int windows; // 5-min windows that contributed
+  final double? diffAcf1; // pooled over those windows
+  final double? jitterShare; // [nnJitter] over the same windows
+  const SessionRmssd({
+    required this.rmssd,
+    required this.windows,
+    this.diffAcf1,
+    this.jitterShare,
+  });
+  Map<String, dynamic> toJson() => {
+        'rmssd_ms': round6(rmssd),
+        'windows': windows,
+        if (diffAcf1 != null) 'diff_acf1': round6(diffAcf1!),
+        if (jitterShare != null) 'jitter_share': round6(jitterShare!),
+      };
 }
 
 /// Sleep-session nightly RMSSD (ms) as the arithmetic mean of cleaned
@@ -366,7 +639,8 @@ Metric<double> nocturnalRmssd(
 ///
 /// This is the nightly HEADLINE (→ `ln_rmssd` → readiness), so it refuses
 /// rather than approximates: absent when the successive differences fail
-/// [kNnDiffAcf1Floor].
+/// [kNnDiffAcf1Floor] and the spectrum does not show them to be breathing
+/// (`_judgeJitter`).
 ///
 /// [rrMs]/[rrTsMs] are the raw RR intervals and their beat-end epoch times in
 /// milliseconds. [startSec]/[endSec] bound the chosen sleep session in epoch
@@ -379,13 +653,36 @@ Metric<double> sleepSessionWindowedRmssd(
   required int endSec,
   int windowSec = 300,
 }) {
+  final m = sleepSessionRmssdDetail(rrMs, rrTsMs,
+      startSec: startSec, endSec: endSec, windowSec: windowSec);
+  return m.present
+      ? Metric<double>(
+          value: m.value!.rmssd,
+          confidence: m.confidence,
+          tier: m.tier,
+          inputs_used: m.inputs_used,
+          note: m.note,
+        )
+      : Metric<double>.absent(
+          tier: m.tier, inputs_used: m.inputs_used, note: m.note);
+}
+
+/// [sleepSessionWindowedRmssd] with its diagnostics ([SessionRmssd]). The two
+/// are one computation; this is the one that does it.
+Metric<SessionRmssd> sleepSessionRmssdDetail(
+  List<double> rrMs,
+  List<double> rrTsMs, {
+  required int startSec,
+  required int endSec,
+  int windowSec = 300,
+}) {
   const inputs = ['rr_sleep_window'];
   if (startSec <= 0 ||
       endSec <= startSec ||
       rrMs.isEmpty ||
       rrTsMs.isEmpty ||
       rrMs.length != rrTsMs.length) {
-    return const Metric<double>.absent(
+    return const Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'invalid or empty RR session window',
@@ -403,7 +700,7 @@ Metric<double> sleepSessionWindowedRmssd(
   }
 
   if (buckets.isEmpty) {
-    return const Metric<double>.absent(
+    return const Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no RR beats inside the session window',
@@ -412,10 +709,12 @@ Metric<double> sleepSessionWindowedRmssd(
 
   final rmssds = <double>[];
   final runs = <List<double>>[]; // pooled jitter floor — see [nocturnalRmssd]
+  final levelRuns = <List<double>>[]; // the same windows' levels — [nnJitter]
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
+    final cleanRuns = _cleanWindowRuns(buckets[idx]!, bucketsTs[idx]!);
     final diffRuns = [
-      for (final r in _cleanWindowRuns(buckets[idx]!, bucketsTs[idx]!))
+      for (final r in cleanRuns)
         if (r.length >= 2) [for (var i = 1; i < r.length; i++) r[i] - r[i - 1]]
     ];
     var ssd = 0.0;
@@ -428,6 +727,7 @@ Metric<double> sleepSessionWindowedRmssd(
     }
     if (nd == 0) continue;
     runs.addAll(diffRuns);
+    levelRuns.addAll(cleanRuns);
     rmssds.add(math.sqrt(ssd / nd));
   }
 
@@ -435,15 +735,16 @@ Metric<double> sleepSessionWindowedRmssd(
   // are noise, the honest output is no headline, not a plausible one — the
   // readiness composite already treats a null HRV driver as absent.
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
-    return Metric<double>.absent(
+  final verdict = _judgeJitter(acf1, levelRuns);
+  if (verdict.refused) {
+    return Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: _jitterNote(acf1),
+      note: verdict.note,
     );
   }
   if (rmssds.isEmpty) {
-    return const Metric<double>.absent(
+    return const Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no valid 5-min windows for sleep-session RMSSD',
@@ -451,14 +752,20 @@ Metric<double> sleepSessionWindowedRmssd(
   }
 
   final meanRmssd = mean(rmssds)!;
-  final conf = ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
+  final conf = ((rmssds.length / 12.0).clamp(0.0, 1.0) * verdict.quality)
       .clamp(0.3, 0.95);
-  return Metric<double>(
-    value: meanRmssd,
+  return Metric<SessionRmssd>(
+    value: SessionRmssd(
+      rmssd: meanRmssd,
+      windows: rmssds.length,
+      diffAcf1: acf1,
+      jitterShare: verdict.jitter?.share,
+    ),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows.',
+    note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows.'
+        '${verdict.note == null ? '' : ' ${verdict.note}.'}',
   );
 }
 

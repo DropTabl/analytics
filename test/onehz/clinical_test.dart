@@ -3,6 +3,37 @@ import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+/// Pure respiratory sinus arrhythmia: NN sampled at its own beat times, so the
+/// breathing phase advances by the beat's real duration (breaths per beat
+/// b = respBrpm / hrBpm). Noise-free.
+List<double> rsaNn({
+  required double hrBpm,
+  required double respBrpm,
+  required double ampMs,
+  int beats = 3000,
+}) {
+  final base = 60000.0 / hrBpm, f = respBrpm / 60.0;
+  final out = <double>[];
+  var tSec = 0.0;
+  for (var i = 0; i < beats; i++) {
+    final v = base + ampMs * math.sin(2 * math.pi * f * tSec);
+    out.add(v);
+    tSec += v / 1000.0;
+  }
+  return out;
+}
+
+/// Cumulative beat-END times (ms) for [nn], starting at [t0Ms].
+List<double> beatEnds(List<double> nn, {double t0Ms = 0}) {
+  final out = <double>[];
+  var t = t0Ms;
+  for (final v in nn) {
+    t += v;
+    out.add(t);
+  }
+  return out;
+}
+
 void main() {
   group('time-domain HRV (hand-computed)', () {
     test('RMSSD/SDNN/pNN50 on a constant-then-stepped NN series', () {
@@ -91,6 +122,188 @@ void main() {
       expect(clean.pnn50, 0.0);
       // SDNN is a dispersion of levels, not of differences — unaffected.
       expect(clean.sdnn, closeTo(seamed.sdnn!, 1e-12));
+    });
+  });
+
+  group('HRV-02b: the jitter screen does not refuse respiratory sinus arrhythmia',
+      () {
+    // RSA alone: d_n is the same sinusoid as NN, so ACF1(d) = cos(2π·b) with b
+    // breaths per beat. b > 0.307 (HR 48 at 16 br/min, HR 45 at 14) reads below
+    // the −0.35 floor although every millisecond of it is physiology.
+    test('RSA at HR 48 / 16 br/min keeps RMSSD (hrvTime)', () {
+      final m = hrvTime(rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50));
+      final v = m.value!;
+      expect(v.diffAcf1!, closeTo(-0.499, 0.02));
+      expect(v.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(v.rmssd, isNotNull, reason: m.note);
+      expect(v.rmssd!, closeTo(61.4, 1.0)); // √2·50·sin(π/3) = 61.24
+      expect(v.pnn50, isNotNull);
+      expect(v.jitterShare!, lessThan(0.05));
+      expect(m.note, isNot(contains('rmssd_refused')));
+      expect(m.confidence, greaterThan(0.9));
+    });
+
+    test('RSA at HR 45 / 16 and HR 50 / 18 keep RMSSD', () {
+      final a = hrvTime(rsaNn(hrBpm: 45, respBrpm: 16, ampMs: 60)).value!;
+      expect(a.diffAcf1!, closeTo(-0.614, 0.02));
+      expect(a.rmssd!, closeTo(76.3, 1.0));
+      final b = hrvTime(rsaNn(hrBpm: 50, respBrpm: 18, ampMs: 50)).value!;
+      expect(b.diffAcf1!, closeTo(-0.636, 0.02));
+      expect(b.rmssd!, closeTo(64.0, 1.0));
+    });
+
+    test('a pure 3-beat oscillation (b = 1/3, ACF1 = −0.5 exactly) is kept', () {
+      // White noise also reads −0.5: no rule on ACF1 alone can decide this one.
+      final nn = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40 * math.sin(2 * math.pi * i / 3)
+      ]; // 17 Welch segments
+      final v = hrvTime(nn).value!;
+      expect(v.diffAcf1!, closeTo(-0.4996, 1e-3));
+      expect(v.rmssd!, closeTo(49.01, 0.05));
+    });
+
+    test('sleepSessionWindowedRmssd keeps the HR-48 RSA headline', () {
+      final rr = rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50, beats: 20160); // 7 h
+      final ts = beatEnds(rr, t0Ms: 1e12);
+      final startSec = (ts.first / 1000).floor();
+      final endSec = (ts.last / 1000).ceil() + 1;
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: startSec, endSec: endSec);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!, closeTo(61.3, 1.5));
+      final d = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: endSec);
+      expect(d.present, isTrue);
+      expect(d.value!.rmssd, m.value);
+      expect(d.value!.jitterShare!, lessThan(0.05));
+      expect(d.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(d.value!.windows, greaterThan(80));
+      expect(d.confidence, m.confidence);
+    });
+
+    test('nocturnalRmssd keeps the HR-48 RSA night', () {
+      final nn = rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50, beats: 20160);
+      final m = nocturnalRmssd(nn, beatEnds(nn));
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!, closeTo(61.3, 1.5));
+    });
+
+    test('white noise is still refused, and measures as all jitter', () {
+      final rnd = math.Random(7);
+      final jitter = <double>[
+        for (var i = 0; i < 600; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      final noisy = hrvTime(jitter);
+      expect(noisy.value!.rmssd, isNull);
+      expect(noisy.value!.jitterShare!, greaterThan(kJitterShareCeiling));
+      expect(noisy.note, contains('rmssd_refused:acf1='));
+      expect(noisy.note, contains('jitter_share='));
+    });
+
+    test('RSA buried in white noise is still refused', () {
+      final rnd = math.Random(5);
+      final nn = <double>[
+        for (var i = 0; i < 3000; i++)
+          1000 +
+              15 * math.sin(2 * math.pi * i / 5) +
+              (rnd.nextDouble() - 0.5) * 86.6
+      ];
+      final m = hrvTime(nn);
+      expect(m.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(m.value!.rmssd, isNull);
+      expect(m.value!.jitterShare!, greaterThan(kJitterShareCeiling));
+      expect(m.note, contains('rmssd_refused:acf1='));
+      expect(m.note, contains('jitter_share='));
+    });
+
+    test('RSA with beat-TIME jitter is still refused', () {
+      // Each beat time perturbed independently, so the NN noise is MA(1).
+      final rnd = math.Random(3);
+      final clean = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30);
+      final t = beatEnds(clean);
+      double g() {
+        // Box–Muller, σ 20 ms
+        final u = 1 - rnd.nextDouble(), v = rnd.nextDouble();
+        return 20 * math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * v);
+      }
+
+      final tj = [for (final x in t) x + g()];
+      final nn = [for (var i = 1; i < tj.length; i++) tj[i] - tj[i - 1]];
+      final m = hrvTime(nn);
+      expect(m.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(m.value!.rmssd, isNull);
+      expect(m.value!.jitterShare!, greaterThan(kJitterShareCeiling));
+    });
+
+    test('a beat-to-beat alternation is still refused', () {
+      // Peak at 0.5 cycles/beat: a detector artefact or bigeminy, not
+      // resolvable RSA, so a near-zero floor must not rescue it.
+      final nn = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40.0 * (i.isEven ? 1 : -1)
+      ];
+      final m = hrvTime(nn);
+      expect(m.value!.diffAcf1!, closeTo(-1.0, 0.01));
+      expect(m.value!.rmssd, isNull);
+      expect(m.note, contains('rmssd_refused:acf1='));
+    });
+
+    test('too short to arbitrate: the ACF1 verdict stands', () {
+      final nn = <double>[
+        for (var i = 0; i < 300; i++) 1000 + 40 * math.sin(2 * math.pi * i / 3)
+      ]; // 8 Welch segments < kJitterMinSegments
+      final m = hrvTime(nn);
+      expect(m.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(m.value!.rmssd, isNull);
+      expect(m.value!.jitterShare, isNull);
+      expect(m.note, contains('rmssd_refused:acf1='));
+    });
+
+    test('no change above the floor', () {
+      double rmssdOf(List<double> nn) {
+        var s = 0.0;
+        for (var i = 1; i < nn.length; i++) {
+          s += (nn[i] - nn[i - 1]) * (nn[i] - nn[i - 1]);
+        }
+        return math.sqrt(s / (nn.length - 1));
+      }
+
+      final smooth = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40 * math.sin(2 * math.pi * i / 16)
+      ];
+      final hr60 = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30);
+      for (final nn in [smooth, hr60]) {
+        final m = hrvTime(nn);
+        expect(m.value!.diffAcf1!, greaterThan(kNnDiffAcf1Floor));
+        expect(m.value!.rmssd, rmssdOf(nn));
+        // _acf1Quality is 1.0 at ACF1 ≥ 0, so beat count tops out at 0.95.
+        expect(m.confidence, closeTo(0.95, 1e-12));
+        expect(m.note, isNot(contains('RSA')));
+      }
+    });
+
+    test('nnJitter normalisation', () {
+      // White noise of variance σ² has E[psd] = σ² and MSSD = 2σ², so share 1.
+      final rnd = math.Random(7);
+      final white = <double>[
+        for (var i = 0; i < 3000; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      expect(nnJitter([white])!.share, closeTo(1.0, 0.1));
+      final rsa = nnJitter([rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50)])!;
+      expect(rsa.peakCpb, closeTo(0.328, 0.016));
+      expect(rsa.peakHz!, closeTo(0.263, 0.02));
+      expect(rsa.share, lessThan(0.05));
+      expect(rsa.segments, 92);
+      expect(nnJitter([white.sublist(0, 300)]), isNull,
+          reason: 'fewer than kJitterMinSegments segments');
+    });
+
+    test('Welch segments never cross a run boundary', () {
+      // 30 runs of 63 beats: plenty of beats, not one whole 64-beat segment.
+      final runs = [
+        for (var r = 0; r < 30; r++)
+          [for (var i = 0; i < 63; i++) 1000 + 40 * math.sin(2 * math.pi * i / 3)]
+      ];
+      expect(nnJitter(runs), isNull);
     });
   });
 
