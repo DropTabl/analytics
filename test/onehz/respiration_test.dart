@@ -348,6 +348,25 @@ void main() {
       expect(m.note, isNot(contains('beat rate too low')));
     });
 
+    test('RSA: a sub-window\'s own ceiling comes from its median beat interval',
+        () {
+      // 55 bpm with a 25 s dropout every 150 s: every 300 s sub-window is
+      // ~83 % covered — complete enough — but its span/(k−1) reads ~1.31 s
+      // (~46 bpm), below the HF band. Only the median-NN ceiling keeps them.
+      final s = gappyRsaNight(3, hours: 2, dropouts: [
+        for (var k = 0; k < 48; k++)
+          ((k * 150 + 60) / 3600.0, (k * 150 + 85) / 3600.0)
+      ]);
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.brpm!, closeTo(15.0, 1.0));
+      expect(m.value!.subwindows, 46);
+      expect(m.value!.usableSubwindows, 46,
+          reason: 'every sub-window is ≥ 80 % covered and resolvable');
+    });
+
     test('RSA: confidence scales with usable sub-windows', () {
       final s = rsaNight(11);
       final c = correctRr(s.rr, rrTsMs: s.t);
