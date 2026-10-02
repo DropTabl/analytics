@@ -109,7 +109,8 @@ String _jitterNote(double acf1, NnJitter? j, _JitterRefusal why) {
         : 'the NN successive differences fail the jitter screen (floor '
             '$kNnDiffAcf1Floor) and the spectrum saw only ${_pct(j.coverage)} % '
             'of their power (it needs ${_pct(kJitterMinCoverage)} %; the rest '
-            'sits in runs too short to assess), so the refusal stands',
+            'sits in runs too short, or at run edges too tapered, to assess), '
+            'so the refusal stands',
     _JitterRefusal.noise =>
       'a broadband jitter floor carries ${_pct(j!.worstShare)} % of the NN '
           'successive-difference power (up to ${_pct(j.upperShare)} % within '
@@ -158,12 +159,13 @@ const int kJitterMinSegments = 16;
 /// than physiology is never published as vagal tone.
 const double kJitterShareCeiling = 0.5;
 
-/// Fewest share of the successive-difference power (Σd²) [nnJitter]'s spectrum
-/// must have SEEN before it may overrule the screen. Runs shorter than one
-/// 64-beat segment, and the tails of longer ones, are invisible to it; their
-/// power is charged as jitter in the worst case ([NnJitter.worstShare]), and
-/// below 90 % assessed the rescue is refused outright — a spectrum that saw
-/// a tenth or less of the evidence is not the judge of the rest.
+/// Fewest share of the successive-difference power [nnJitter]'s spectrum must
+/// have SEEN ([NnJitter.coverage]) before it may overrule the screen. Runs
+/// shorter than one 64-beat segment are invisible to it, and noise at a
+/// segment's tapered ends barely registers; that unseen power is charged as
+/// jitter in the worst case ([NnJitter.worstShare]), and below 90 % seen the
+/// rescue is refused outright — a spectrum that missed more than a tenth of
+/// the evidence is not the judge of the rest.
 const double kJitterMinCoverage = 0.9;
 
 /// Search band for the dominant HF peak and the floor, cycles/beat. Below 0.1
@@ -185,12 +187,14 @@ const double _jitMaxPeakCpb = 0.47;
 
 /// The night's beat-timing jitter, measured from the spectrum's SHAPE.
 class NnJitter {
-  /// Estimated fraction of the ASSESSED MSSD explained by a jitter floor, 0..1:
+  /// Estimated fraction of the spectrum's own MSSD explained by a jitter
+  /// floor, 0..1:
   /// the larger of the white-NN and the beat-time-jitter model.
   final double share;
 
-  /// Fraction of the successive-difference power (Σd²) inside the spectrum's
-  /// segments, 0..1.
+  /// Fraction of the successive-difference power the spectrum saw: its
+  /// implied (taper-weighted) MSSD over the MSSD of every within-run
+  /// difference, 0..1.
   final double coverage;
 
   /// Dominant peak in [0.1, 0.5] cycles/beat.
@@ -211,15 +215,17 @@ class NnJitter {
   /// as jitter: `coverage·share + (1 − coverage)`.
   double get worstShare => coverage * share + (1 - coverage);
 
-  /// [worstShare] plus a one-sided 99 % margin for the estimate's own spread:
-  /// `2.33 · 0.25 / √segments`. MEASURED (200 draws per point, white and
-  /// beat-time jitter at a true share of 0.5): the estimate's SD × √segments
-  /// is 0.18–0.23 from 16 to 200 segments, so 0.25 is a rounded-up bound. The
-  /// rescue judges this, so a night that is truly half jitter is not rescued
-  /// by a lucky draw — at 16 segments the margin is 0.15, over a whole night
-  /// (~900 segments) 0.02.
+  /// [worstShare] plus a one-sided 99.9 % margin for the estimate's own
+  /// spread: `3.09 · 0.25 / √segments`. MEASURED (200 draws per point, white
+  /// and beat-time jitter at a true share of 0.5): the estimate's SD ×
+  /// √segments is 0.18–0.23 from 16 to 200 segments, so 0.25 is a rounded-up
+  /// bound. The rescue judges this, so a night that is truly half jitter is
+  /// not rescued by a lucky draw (measured: 240/240 refused at HR 45–50, while
+  /// 30 % jitter is kept 240/240) — at 16 segments the margin is 0.19, over a
+  /// whole night (~900 segments) 0.03. 99 % let ~1 % of half-jitter nights
+  /// through, by construction.
   double get upperShare =>
-      worstShare + 2.33 * 0.25 / math.sqrt(segments.toDouble());
+      worstShare + 3.09 * 0.25 / math.sqrt(segments.toDouble());
   Map<String, dynamic> toJson() => {
         'jitter_share': round6(share),
         'jitter_coverage': round6(coverage),
@@ -266,12 +272,19 @@ final Float64List _jitSin = Float64List.fromList([
 ///
 /// [nnRuns] are contiguous LEVEL runs (NN values of beats adjacent in time — a
 /// seam starts a new run). Welch 1967: 64-beat Hann segments, 50 % overlap,
-/// each linearly detrended; a segment never crosses a run boundary. The share
-/// is over the MSSD of exactly the differences inside those segments, and
-/// [NnJitter.coverage] says how much of ALL the within-run Σd² that is — runs
-/// too short for a segment are invisible to the spectrum and must not dilute
-/// it. Null when fewer than [kJitterMinSegments] segments fit, or the assessed
-/// MSSD is zero.
+/// each linearly detrended; a segment never crosses a run boundary, and a
+/// run's last segment is END-ALIGNED so its tail is seen too.
+///
+/// WHAT THE SPECTRUM SAW is measured in power, not in beats. Differencing has
+/// gain 4·sin²(π·f), so the spectrum implies an MSSD,
+/// `(1/64)·Σ_k PSD_k·4·sin²(π·k/64)` over the full circle — by Parseval, the
+/// Hann-weighted MSSD of exactly the beats it held, weighted as it weighted
+/// them. The share is over THAT. [NnJitter.coverage] is the power that MSSD
+/// accounts for over the differences the segments tile, as a fraction of ALL
+/// within-run Σd²: ≈ 1 on a stationary night whatever its run lengths, but
+/// power the spectrum never saw — runs too short for a segment, or noise
+/// sitting where the taper nearly zeroes a segment's ends — lowers it. Null when fewer than [kJitterMinSegments] segments
+/// fit, or either MSSD is zero.
 NnJitter? nnJitter(List<List<double>> nnRuns) {
   const nb = _jitBins;
   final acc = Float64List(nb);
@@ -287,23 +300,22 @@ NnJitter? nnJitter(List<List<double>> nnRuns) {
   final y = Float64List(_jitSegBeats);
   var segments = 0;
   var ssdAll = 0.0;
-  var ssd = 0.0; // inside the segments only
-  var nd = 0;
+  var ndAll = 0;
+  var ndSeen = 0; // differences inside runs the segments tile
   final levels = <double>[];
   for (final run in nnRuns) {
     levels.addAll(run);
-    // Beats [0, seen) are covered by this run's segments.
-    final fit = run.length - _jitSegBeats;
-    final seen = fit < 0 ? 0 : fit - fit % _jitSegStep + _jitSegBeats;
     for (var i = 1; i < run.length; i++) {
       final d = run[i] - run[i - 1];
       ssdAll += d * d;
-      if (i < seen) {
-        ssd += d * d;
-        nd++;
-      }
+      ndAll++;
     }
-    for (var s = 0; s + _jitSegBeats <= run.length; s += _jitSegStep) {
+    final fit = run.length - _jitSegBeats;
+    if (fit < 0) continue;
+    ndSeen += run.length - 1;
+    final starts = [for (var s = 0; s <= fit; s += _jitSegStep) s];
+    if (starts.last != fit) starts.add(fit); // end-aligned: the tail is seen
+    for (final s in starts) {
       var mu = 0.0;
       for (var i = 0; i < _jitSegBeats; i++) {
         mu += run[s + i];
@@ -329,10 +341,16 @@ NnJitter? nnJitter(List<List<double>> nnRuns) {
       segments++;
     }
   }
-  if (segments < kJitterMinSegments || nd == 0) return null;
-  final mssd = ssd / nd;
-  if (mssd <= 0) return null;
+  if (segments < kJitterMinSegments || ndAll == 0) return null;
+  final mssdAll = ssdAll / ndAll;
   final psd = [for (final a in acc) a / segments];
+  // Bins 1..31 stand for their mirror images too; 0 has no gain, 32 is single.
+  var seen = psd[_jitBins - 1] * 4;
+  for (var k = 1; k < _jitBins - 1; k++) {
+    seen += 2 * psd[k] * 4 * math.pow(math.sin(math.pi * k / _jitSegBeats), 2);
+  }
+  final mssd = seen / _jitSegBeats;
+  if (mssdAll <= 0 || mssd <= 0) return null;
   final kLo = (_jitLoCpb * _jitSegBeats).ceil();
   const kHi = _jitSegBeats ~/ 2;
   var kPk = kLo;
@@ -354,7 +372,7 @@ NnJitter? nnJitter(List<List<double>> nnRuns) {
   final medNn = median(levels);
   return NnJitter(
     share: (math.max(white, timing) / mssd).clamp(0.0, 1.0),
-    coverage: ssdAll > 0 ? (ssd / ssdAll).clamp(0.0, 1.0) : 1.0,
+    coverage: (mssd * ndSeen / ssdAll).clamp(0.0, 1.0),
     peakCpb: peakCpb,
     peakHz: (medNn != null && medNn > 0) ? peakCpb / (medNn / 1000.0) : null,
     segments: segments,
@@ -378,7 +396,7 @@ class _JitterVerdict {
 /// the set of refused nights can only SHRINK and a night at ACF1 ≥ −0.35 is
 /// judged exactly as before. Kept only when the spectrum saw ≥
 /// [kJitterMinCoverage] of the difference power, the worst-case jitter share
-/// (with its 99 % margin, [NnJitter.upperShare]) is ≤ [kJitterShareCeiling],
+/// (with its 99.9 % margin, [NnJitter.upperShare]) is ≤ [kJitterShareCeiling],
 /// and the dominant peak is breathing
 /// ([respLoHz]–[respHiHz], below [_jitMaxPeakCpb]); otherwise refused, with the
 /// cause in the note.

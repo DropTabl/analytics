@@ -361,6 +361,78 @@ void main() {
       expect(j.worstShare, greaterThan(0.9));
     });
 
+    test('genuine RSA at HR 45/48/50 publishes through ALL THREE estimators',
+        () {
+      // 5-min windows at 50 bpm hold ~250 beats; segment tiling that left the
+      // last ~26 of each unseen read a noise-free night as only 89.5 % seen
+      // and refused it in nocturnalRmssd and the nightly headline.
+      for (final c in [
+        (45.0, 16.0, 60.0, 76.3),
+        (48.0, 16.0, 50.0, 61.4),
+        (50.0, 18.0, 50.0, 64.0),
+      ]) {
+        final nn = rsaNn(
+            hrBpm: c.$1,
+            respBrpm: c.$2,
+            ampMs: c.$3,
+            beats: (7 * 3600 * c.$1 / 60).round()); // 7 h
+        final ends = beatEnds(nn, t0Ms: 1e12);
+        final why = 'HR ${c.$1} / ${c.$2} br/min';
+        final h = hrvTime(nn, nnTimesMs: ends);
+        expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor), reason: why);
+        expect(h.value!.rmssd!, closeTo(c.$4, 1.5), reason: '$why: ${h.note}');
+        final n = nocturnalRmssd(nn, ends);
+        expect(n.present, isTrue, reason: '$why: ${n.note}');
+        expect(n.value!, closeTo(c.$4, 1.5), reason: why);
+        final startSec = (ends.first / 1000).floor();
+        final endSec = (ends.last / 1000).ceil() + 1;
+        final sd = sleepSessionRmssdDetail(nn, ends,
+            startSec: startSec, endSec: endSec);
+        expect(sd.present, isTrue, reason: '$why: ${sd.note}');
+        expect(sd.value!.rmssd, closeTo(c.$4, 1.5), reason: why);
+        expect(sd.confidence, greaterThan(0.9), reason: why);
+      }
+    });
+
+    test('noise at a segment\'s tapered ends is not counted as seen', () {
+      // 32 separate 64-beat runs, one per 5-min window, each a clean 3-beat
+      // oscillation (RMSSD 12.25 ms) with beat 1 knocked ±150 ms. Every beat
+      // survives the window cleaner; ~83 % of the difference power is that
+      // one beat, which the Hann taper all but zeroes. Counting it as seen
+      // read ~0 % jitter and published ~29 ms at 0.95.
+      final rr = <double>[], ts = <double>[];
+      final nnRuns = <List<double>>[];
+      const startSec = 1000000000;
+      for (var w = 0; w < 32; w++) {
+        var t = (startSec + w * 300 + 10) * 1000.0;
+        final run = <double>[];
+        for (var i = 0; i < 64; i++) {
+          final v = 1250 +
+              10 * math.sin(2 * math.pi * i / 3) +
+              (i == 1 ? (w.isEven ? 150.0 : -150.0) : 0.0);
+          t += v;
+          rr.add(v);
+          ts.add(t);
+          run.add(v);
+        }
+        nnRuns.add(run);
+      }
+      final j = nnJitter(nnRuns)!;
+      expect(j.coverage, lessThan(0.5));
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull, reason: h.note);
+      final n = nocturnalRmssd(rr, ts);
+      expect(n.present, isFalse, reason: 'got ${n.value}');
+      final s = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: startSec + 32 * 300);
+      expect(s.present, isFalse, reason: 'got ${s.value?.rmssd}');
+      for (final note in [h.note, n.note, s.note]) {
+        expect(note, startsWith('rmssd_refused:acf1='));
+        expect(note, contains('the spectrum saw only'));
+      }
+    });
+
     test('beat-TIME jitter at HR 45/48/50 is refused from a true share of 50 %',
         () {
       // The white-NN model alone read HR 48 / 16 br/min / ±30 ms with σ 30 ms
@@ -445,7 +517,7 @@ void main() {
       expect(rsa.peakCpb, closeTo(0.328, 0.016));
       expect(rsa.peakHz!, closeTo(0.263, 0.02));
       expect(rsa.share, lessThan(0.05));
-      expect(rsa.segments, 92);
+      expect(rsa.segments, 93, reason: '92 + one end-aligned tail segment');
       expect(rsa.coverage, closeTo(1.0, 0.01),
           reason: '1 run; only the last 24 beats fall outside a segment');
       // Pure beat-TIME jitter reads as all jitter too.
