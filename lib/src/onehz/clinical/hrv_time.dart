@@ -460,11 +460,17 @@ class RrCoverage {
 
 /// [RrCoverage] of raw RR [rrMs] against their beat-END epoch times [rrTsMs]
 /// (time-sorted, same length). The span is `last − first + rrMs.first`: beat 0
-/// began before its end stamp. Null when fewer than 2 beats, the lengths
-/// differ, or the span is under [kRrCoverageMinSpanSec].
+/// began before its end stamp — but only when that first interval is itself
+/// plausible. An implausible one is never summed, so it must not stretch the
+/// denominator either (a 65 535 ms glitch there hid a 12.5 % over-count).
+/// Null when fewer than 2 beats, the lengths differ, or the span is under
+/// [kRrCoverageMinSpanSec].
 RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
   if (rrMs.length < 2 || rrMs.length != rrTsMs.length) return null;
-  final spanSec = (rrTsMs.last - rrTsMs.first + rrMs.first) / 1000.0;
+  final first = rrMs.first;
+  final firstPlausible = first >= 300 && first <= 2400;
+  final spanSec =
+      (rrTsMs.last - rrTsMs.first + (firstPlausible ? first : 0)) / 1000.0;
   if (!spanSec.isFinite || spanSec < kRrCoverageMinSpanSec) return null;
   var sum = 0.0;
   var implausible = 0;

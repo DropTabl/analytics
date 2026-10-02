@@ -503,6 +503,28 @@ void main() {
       expect(c.overCounted, isFalse);
     });
 
+    test('an implausible FIRST interval cannot widen the span', () {
+      // Every 8th beat duplicated reads 1.125 and is refused. A 65 535 ms
+      // glitch as the first interval used to stretch the span by 64.5 s while
+      // never being summed, and the same stream read ~1.07 and passed.
+      final rr = <double>[], ts = <double>[];
+      for (var i = 0; i < 1200; i++) {
+        final t = 1e12 + (i + 1) * 1000.0;
+        rr.add(1000.0);
+        ts.add(t);
+        if (i % 8 == 7) {
+          rr.add(1000.0);
+          ts.add(t);
+        }
+      }
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(1.125, 1e-3));
+      expect(rrCoverage(rr, ts)!.overCounted, isTrue);
+      rr[0] = 65535.0;
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.overCounted, isTrue, reason: 'coverage ${c.coverage}');
+    });
+
     test('a gappy night reads well under 1 and is never refused for it', () {
       final rr = [for (var i = 0; i < 1200; i++) 1000.0];
       final ts = [
