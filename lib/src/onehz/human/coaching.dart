@@ -282,6 +282,24 @@ class JournalTagCorrelation {
   const JournalTagCorrelation(this.tag, this.effects);
 }
 
+/// PER-TAG outcome lag, in days — the tag twin of [journalFieldLagDays].
+/// Behaviour during the day lands on the night that follows (+1); retrospective
+/// tags describe the night already over (0). Unlisted tags keep lag 0.
+const Map<String, int> journalTagLagDays = {
+  'caffeine': 1,
+  'alcohol': 1,
+  'late meal': 1,
+  'screens late': 1,
+  'sauna': 1,
+  'cold plunge': 1,
+  'workout': 1,
+  'social': 1,
+  'rest day': 1,
+  'stress': 0,
+  'poor sleep': 0,
+  'sick': 0,
+};
+
 /// Per-tag effect of a journal entry on each outcome series.
 ///
 /// [outcomes] values must be POSITIONALLY ALIGNED to [dates] (same length); a
@@ -308,10 +326,17 @@ class JournalTagCorrelation {
 ///
 /// When both sides are exactly constant (pooled SD = 0) d is undefined and we
 /// require [minNForZeroSpread] observations per side before the floor passes.
+///
+/// PER-TAG LAG ([tagLagDays], same reasoning as [journalFieldLagDays]): an
+/// outcome on day D is split by the tags logged on D − lag. A behaviour tag
+/// logged on D (alcohol, late meal) lands on the night ending the morning of
+/// D+1, so its outcome is D+1's. When lag ≠ 0 and D − lag has no journal row
+/// the day is dropped — we don't know whether the tag applied.
 List<JournalTagCorrelation> journalCorrelations({
   required List<JournalDay> journal,
   required List<String> dates,
   required Map<String, List<double?>> outcomes,
+  Map<String, int> tagLagDays = journalTagLagDays,
   double minEffectPct = 3.0,
   double minCohensD = 0.5,
   int minNForZeroSpread = 3,
@@ -364,10 +389,19 @@ List<JournalTagCorrelation> journalCorrelations({
       final untagged = <double>[];
       final vals = <double>[];
       final inGroup = <bool>[];
+      final lag = tagLagDays[tag] ?? 0;
       for (var i = 0; i < dates.length; i++) {
         final v = entry.value[i];
         if (v == null) continue;
-        final hasTag = tagByDate[dates[i]]?.contains(tag) == true;
+        final Set<String>? tags;
+        if (lag == 0) {
+          tags = tagByDate[dates[i]];
+        } else {
+          final src = shiftDayLabel(dates[i], -lag);
+          tags = src == null ? null : tagByDate[src];
+          if (tags == null) continue; // no row that day: unknown, not untagged
+        }
+        final hasTag = tags?.contains(tag) == true;
         (hasTag ? tagged : untagged).add(v);
         vals.add(v);
         inGroup.add(hasTag);

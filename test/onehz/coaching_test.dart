@@ -372,7 +372,8 @@ void main() {
         'recovery': [40, 41, 42, 43, 44, 80, 81, 82, 83, 84],
       };
       final out = journalCorrelations(
-          journal: journal, dates: dates, outcomes: outcomes);
+          journal: journal, dates: dates, outcomes: outcomes,
+          tagLagDays: const {});
       final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
       expect(eff.insufficient, isFalse);
       expect(eff.meaningful, isTrue);
@@ -403,6 +404,29 @@ void main() {
       final eff = out.firstWhere((c) => c.tag == 'x').effects.single;
       expect(eff.nTagged, 1);
       expect(eff.insufficient, isTrue);
+    });
+
+    test('a behaviour tag is matched to the NEXT morning, not the same day', () {
+      // Alcohol logged on day D shows up in the night ending the morning of
+      // D+1. Lag 0 compared it against a night that was already over.
+      String label(int i) =>
+          DateTime.utc(2026, 3, 1 + i).toIso8601String().substring(0, 10);
+      final dates = [for (var i = 0; i < 20; i++) label(i)];
+      final out = journalCorrelations(
+        journal: [
+          for (var i = 0; i < 20; i++)
+            JournalDay(label(i), {if (i % 4 == 0) 'alcohol'}),
+        ],
+        dates: dates,
+        outcomes: {
+          'recovery': [for (var i = 0; i < 20; i++) i % 4 == 1 ? 40.0 : 80.0],
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
+      expect(eff.nTagged, 5);
+      expect(eff.nUntagged, 14, reason: 'day 0 has no prior row: dropped');
+      expect(eff.delta, closeTo(-40, 1e-9));
+      expect(eff.meaningful, isTrue);
     });
 
     test('empty journal yields no correlations', () {
@@ -451,6 +475,7 @@ void main() {
 
     test('a large, well-separated effect is still meaningful', () {
       final out = journalCorrelations(
+        tagLagDays: const {}, // stats test, no alignment
         journal: [
           for (var i = 0; i < 5; i++) JournalDay('d$i', const {'alcohol'}),
           for (var i = 5; i < 10; i++) JournalDay('d$i', const {}),
@@ -472,6 +497,7 @@ void main() {
     // -----------------------------------------------------------------------
     test('2 vs 2 cannot be meaningful however cleanly it separates', () {
       final out = journalCorrelations(
+        tagLagDays: const {}, // stats test, no alignment
         journal: const [
           JournalDay('d0', {'alcohol'}),
           JournalDay('d1', {'alcohol'}),
@@ -520,6 +546,7 @@ void main() {
       // are tested too, so the real one has to survive the correction.
       final dates = [for (var i = 0; i < 12; i++) 'd$i'];
       final out = journalCorrelations(
+        tagLagDays: const {}, // stats test, no alignment
         journal: [
           for (var i = 0; i < 12; i++)
             JournalDay('d$i', {
