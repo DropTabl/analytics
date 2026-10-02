@@ -342,7 +342,7 @@ void main() {
       expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
       expect(h.value!.rmssd, isNull);
       expect(h.note, startsWith('rmssd_refused:acf1='));
-      expect(h.note, contains('the spectrum saw only'));
+      expect(h.note, contains('long enough to assess'));
       final n = nocturnalRmssd(m.nn, m.ends);
       expect(n.present, isFalse);
       expect(n.note, startsWith('rmssd_refused:acf1='));
@@ -394,12 +394,12 @@ void main() {
       }
     });
 
-    test('noise at a segment\'s tapered ends is not counted as seen', () {
+    test('noise at a run\'s edge is assessed at full weight (R2 fixture)', () {
       // 32 separate 64-beat runs, one per 5-min window, each a clean 3-beat
       // oscillation (RMSSD 12.25 ms) with beat 1 knocked ±150 ms. Every beat
       // survives the window cleaner; ~83 % of the difference power is that
-      // one beat, which the Hann taper all but zeroes. Counting it as seen
-      // read ~0 % jitter and published ~29 ms at 0.95.
+      // one beat, which a Hann taper all but zeroes: a tapered estimate read
+      // ~0 % jitter and published ~29 ms at 0.95. Untapered blocks see it.
       final rr = <double>[], ts = <double>[];
       final nnRuns = <List<double>>[];
       const startSec = 1000000000;
@@ -418,7 +418,8 @@ void main() {
         nnRuns.add(run);
       }
       final j = nnJitter(nnRuns)!;
-      expect(j.coverage, lessThan(0.5));
+      expect(j.coverage, closeTo(1.0, 1e-9));
+      expect(j.share, greaterThan(0.75));
       final h = hrvTime(rr, nnTimesMs: ts);
       expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
       expect(h.value!.rmssd, isNull, reason: h.note);
@@ -429,7 +430,7 @@ void main() {
       expect(s.present, isFalse, reason: 'got ${s.value?.rmssd}');
       for (final note in [h.note, n.note, s.note]) {
         expect(note, startsWith('rmssd_refused:acf1='));
-        expect(note, contains('the spectrum saw only'));
+        expect(note, contains('broadband jitter'));
       }
     });
 
@@ -448,7 +449,7 @@ void main() {
                 'seed $seed: ${h.note}';
             expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor), reason: why);
             expect(h.value!.rmssd, isNull, reason: why);
-            expect(h.note, contains('broadband jitter floor'), reason: why);
+            expect(h.note, contains('broadband jitter'), reason: why);
           }
         }
         // The same night with a minority of timestamp jitter is RSA, kept.
@@ -457,18 +458,203 @@ void main() {
       }
     });
 
-    test('the share follows the true jitter fraction for both noise shapes', () {
+    test('the share follows the true jitter fraction, erring only high', () {
+      // The estimate is corrected for what a sinusoid fit captures of PURE
+      // noise; with a real oscillation present it captures less, so the share
+      // reads high — toward refusal, never toward publishing.
       final clean = rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50);
       final m0 = mssdOf(clean);
       final sigmaT = math.sqrt(0.79 * m0 / (6 * 0.21));
       expect(nnJitter([timeJittered(clean, sigmaT, 2)])!.share,
-          closeTo(0.79, 0.05));
+          inInclusiveRange(0.76, 0.94));
       final r = math.Random(4);
-      final sigmaW = math.sqrt(0.39 * m0 / (2 * 0.61));
+      final sigmaW = math.sqrt(0.30 * m0 / (2 * 0.70));
       final white = [for (final v in clean) v + sigmaW * gauss(r)];
-      expect(nnJitter([white])!.share, closeTo(0.39, 0.05));
-      // 61 % physiology clears the margin: kept.
+      expect(nnJitter([white])!.share, inInclusiveRange(0.27, 0.45));
+      // 70 % physiology clears the margin: kept.
       expect(hrvTime(white).value!.rmssd, isNotNull);
+    });
+
+    test('clean long runs cannot outweigh short noisy runs (R3 fixture)', () {
+      // 84 five-minute windows, one run each, first beat ending 11.25 s in.
+      // Runs 1–6: 225 clean beats; runs 7–84: 64 beats of LCG noise. True
+      // noise share 59 %. Averaging power per Welch segment let the 6 long
+      // runs (7 spectra each) outweigh 78 short ones (1 each): read 41 %, and
+      // all three estimators published.
+      const startSec = 1000000000;
+      var u = 7;
+      double lcg() {
+        u = (1664525 * u + 1013904223) % 4294967296;
+        return 2 * u / 4294967296 - 1;
+      }
+
+      final rr = <double>[], ts = <double>[];
+      for (var r = 0; r < 84; r++) {
+        final beats = r < 6 ? 225 : 64;
+        var t = (startSec + r * 300) * 1000.0 + 11250;
+        for (var i = 0; i < beats; i++) {
+          final v = r < 6
+              ? 1250 + 80 * math.sin(2 * math.pi * i / 3)
+              : 1250 + 75 * lcg();
+          if (i > 0) t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull, reason: h.note);
+      final n = nocturnalRmssd(rr, ts);
+      expect(n.present, isFalse, reason: 'got ${n.value}');
+      final s = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: startSec + 84 * 300);
+      expect(s.present, isFalse, reason: 'got ${s.value?.rmssd}');
+    });
+
+    test('pooling is by each block\'s OWN power: long noisy runs, same answer',
+        () {
+      // The R3 shape with every noisy run long enough to assess: the clean
+      // runs' blocks cannot lend their low share to the noisy ones.
+      final rnd = math.Random(17);
+      final runs = <List<double>>[
+        for (var r = 0; r < 6; r++)
+          [for (var i = 0; i < 225; i++) 1250 + 80 * math.sin(2 * math.pi * i / 3)],
+        for (var r = 0; r < 40; r++)
+          [for (var i = 0; i < 140; i++) 1250 + 75 * (2 * rnd.nextDouble() - 1)],
+      ];
+      final j = nnJitter(runs)!;
+      expect(j.coverage, closeTo(1.0, 1e-9));
+      expect(j.worstShare, greaterThan(0.5));
+      final nn = [for (final r in runs) ...r];
+      final ends = <double>[];
+      var t = 0.0;
+      for (final r in runs) {
+        t += 10000;
+        for (final v in r) {
+          t += v;
+          ends.add(t);
+        }
+      }
+      expect(hrvTime(nn, nnTimesMs: ends).value!.rmssd, isNull);
+    });
+
+    test('edge noise in LONG runs is assessed at full weight', () {
+      // The R2 boundary fixture with 200-beat runs: a taper would all but
+      // zero beat 1; disjoint, untapered blocks see it in full.
+      final runs = <List<double>>[
+        for (var w = 0; w < 40; w++)
+          [
+            for (var i = 0; i < 200; i++)
+              1250 +
+                  10 * math.sin(2 * math.pi * i / 3) +
+                  (i == 1 ? (w.isEven ? 150.0 : -150.0) : 0.0)
+          ]
+      ];
+      final j = nnJitter(runs)!;
+      expect(j.coverage, closeTo(1.0, 1e-9));
+      expect(j.worstShare, greaterThan(0.5));
+    });
+
+    test('PROPERTY: never rescued when the true pooled jitter share ≥ 0.5', () {
+      // Seeded random nights of 3–90 runs, each run clean RSA in the range the
+      // rescue exists for (b 0.30–0.45 breaths/beat) plus its own noise shape
+      // (none, white NN, beat-time jitter) and level. Even draws are uniform:
+      // runs of 40–400 beats, noise level 0–60 ms. Odd draws are ADVERSARIAL
+      // and aimed at the decision boundary: mostly short noisy runs (64–70
+      // beats, just long enough for one 64-beat spectrum, pure noise) beside
+      // a few long, large, clean RSA ones (200–400 beats) — the geometry that let clean runs
+      // outweigh noisy ones — with the noise scaled so the night's true share
+      // lands on a drawn target in [0.1, 0.75]. The true share pools each
+      // run's noise power over all difference power.
+      final rnd = math.Random(20261003);
+      var tripped = 0, rescuedLow = 0, low = 0, highRefused = 0, high = 0;
+      for (var draw = 0; draw < 300; draw++) {
+        final adversarial = draw.isOdd;
+        final nRuns = adversarial ? 20 + rnd.nextInt(71) : 3 + rnd.nextInt(38);
+        final cleanRuns = <List<double>>[], noiseRuns = <List<double>>[];
+        var noisePow = 0.0, cleanPow = 0.0;
+        for (var r = 0; r < nRuns; r++) {
+          final noisyRun = !adversarial || rnd.nextDouble() < 0.85;
+          final len = !adversarial
+              ? 40 + rnd.nextInt(361)
+              : (noisyRun ? 64 + rnd.nextInt(7) : 200 + rnd.nextInt(201));
+          final hr = 42 + 18 * rnd.nextDouble();
+          final b = adversarial
+              ? 0.32 + 0.03 * rnd.nextDouble()
+              : 0.30 + 0.15 * rnd.nextDouble();
+          // Adversarial noisy runs carry no RSA at all: pure noise.
+          final amp = !adversarial
+              ? 10 + 50 * rnd.nextDouble()
+              : (noisyRun ? 0.0 : 60 + 30 * rnd.nextDouble());
+          final base = 60000 / hr, ph = 2 * math.pi * rnd.nextDouble();
+          final clean = [
+            for (var i = 0; i < len; i++)
+              base + amp * math.sin(2 * math.pi * b * i + ph)
+          ];
+          final shape = !noisyRun
+              ? 0
+              : (adversarial ? 1 + rnd.nextInt(2) : rnd.nextInt(3));
+          final sigma = adversarial ? 1.0 : 60 * rnd.nextDouble();
+          final noise = switch (shape) {
+            0 => List<double>.filled(len, 0.0),
+            1 => [for (var i = 0; i < len; i++) sigma * gauss(rnd)],
+            _ => () {
+                final e = [for (var i = 0; i <= len; i++) sigma * gauss(rnd)];
+                return [for (var i = 1; i <= len; i++) e[i] - e[i - 1]];
+              }(),
+          };
+          for (var i = 1; i < len; i++) {
+            final dc = clean[i] - clean[i - 1], dn = noise[i] - noise[i - 1];
+            cleanPow += dc * dc;
+            noisePow += dn * dn;
+          }
+          cleanRuns.add(clean);
+          noiseRuns.add(noise);
+        }
+        if (noisePow > 0 && adversarial) {
+          final target = 0.1 + 0.65 * rnd.nextDouble();
+          final k = math.sqrt(target / (1 - target) * cleanPow / noisePow);
+          for (final n in noiseRuns) {
+            for (var i = 0; i < n.length; i++) {
+              n[i] *= k;
+            }
+          }
+          noisePow *= k * k;
+        }
+        final nn = <double>[], ends = <double>[];
+        var t = 0.0;
+        for (var r = 0; r < nRuns; r++) {
+          t += 10000; // a seam between runs
+          for (var i = 0; i < cleanRuns[r].length; i++) {
+            final v = cleanRuns[r][i] + noiseRuns[r][i];
+            t += v;
+            nn.add(v);
+            ends.add(t);
+          }
+        }
+        final truth = noisePow / (noisePow + cleanPow);
+        final h = hrvTime(nn, nnTimesMs: ends);
+        final acf1 = h.value!.diffAcf1;
+        if (acf1 == null || acf1 >= kNnDiffAcf1Floor) continue;
+        tripped++;
+        final rescued = h.value!.rmssd != null;
+        expect(rescued && truth >= 0.5, isFalse,
+            reason: 'draw $draw: true share ${truth.toStringAsFixed(3)} '
+                'rescued — ${h.note}');
+        if (truth >= 0.5) {
+          high++;
+          if (!rescued) highRefused++;
+        }
+        if (truth <= 0.3) {
+          low++;
+          if (rescued) rescuedLow++;
+        }
+      }
+      // ignore: avoid_print
+      print('property: $tripped tripped the screen; ≥ 0.5 refused '
+          '$highRefused of $high; ≤ 0.3 kept $rescuedLow of $low');
+      expect(tripped, greaterThan(150), reason: 'the property was exercised');
+      expect(high, greaterThan(50));
     });
 
     test('a failed rescue says WHICH test it failed', () {
@@ -477,7 +663,7 @@ void main() {
       final white = <double>[
         for (var i = 0; i < 3000; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
       ];
-      expect(hrvTime(white).note, contains('broadband jitter floor'));
+      expect(hrvTime(white).note, contains('broadband jitter'));
       // Alternation: almost no floor, so no noise to blame.
       final alt = <double>[
         for (var i = 0; i < 600; i++) 1000 + 40.0 * (i.isEven ? 1 : -1)
@@ -503,7 +689,7 @@ void main() {
       // ... or too little of the power seen.
       final m = mixedNight();
       expect(hrvTime(m.nn, nnTimesMs: m.ends).note,
-          contains('the spectrum saw only'));
+          contains('long enough to assess'));
     });
 
     test('nnJitter normalisation', () {
