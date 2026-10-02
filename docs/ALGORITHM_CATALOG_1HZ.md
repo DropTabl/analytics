@@ -13,7 +13,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 | Green PPG ADC (`ppgGreen`) | 1 Hz, R24 v24/v12 | layout; raw relative |
 | Red/IR ADC (`spo2RedRaw`/`spo2IrRaw`) | 1 Hz, R24 v24/v12 | layout; relative SpO₂ only, never a %. The two bytes move as one signal, so a red/IR ratio is low confidence |
 | "Ambient" ADC (`ambientRaw`) | 1 Hz, R24 v24/v12 | layout; raw counts, not validated as light |
-| Skin temperature (`skinTempRaw`) | 1 Hz, R24 v24/v12 | layout; raw ADC counts, not verified as temperature (the protocol deprecates the field: it moves 5–10 counts/s). Used only relative to personal baseline, never °C. Only the readiness composite gates it on the night's settled fraction |
+| Skin temperature (`skinTempRaw`) | 1 Hz, R24 v24/v12 | layout; raw ADC counts, not verified as temperature (the protocol deprecates the field: it moves 5–10 counts/s). Used only relative to personal baseline, never °C. Gated on the night's settled fraction by `nightlySkinTemp` (default) and the readiness composite |
 | Skin contact / wear | none | **unsupported**: `skinContact` is deprecated (a float's exponent byte) |
 | `ppgRedIr` | none | **unsupported**: deprecated, straddles a float32, noise |
 | v25 record | ~24 Hz PPG bursts (13–27 s, ~every 20 min) in history | timestamp only; no HR/accel/optical decode |
@@ -29,7 +29,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 1. **PRV, not ECG-HRV** — pulse-rate variability; validate before any clinical claim.
 2. **1 Hz timing quantization** biases successive-difference metrics (RMSSD, pNNx) and the HF band most → lead with long-window/averaging metrics.
 3. **1 Hz accel can't do steps/cadence/gait/frequency-classification** (Nyquist: gait is 1.4–2.5 Hz > 0.5 Hz limit). Only an amplitude index + static orientation survive 24/7.
-4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline. On WHOOP 4 the only temperature input is the raw `skinTempRaw` ADC (layout, see substrate table): temp-based items below run on it relative-only, never as °C. Only the readiness composite applies the settled-fraction gate; the rest score whatever nightly series they are given. SpO₂ is supported as a relative signal only.
+4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline. On WHOOP 4 the only temperature input is the raw `skinTempRaw` ADC (layout, see substrate table): temp-based items below run on it relative-only, never as °C. Only `nightlySkinTemp` (by default) and the readiness composite apply the settled-fraction gate; the rest score whatever nightly series they are given. SpO₂ is supported as a relative signal only.
 5. **Sleep staging** from wrist is at best a 3-class autonomic *estimate*, never PSG 4-stage.
 6. **ACWR** is descriptive ("load vs your norm") only — not injury prediction (Lolli 2019 / Impellizzeri 2020).
 
@@ -78,7 +78,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 - **Branched HR-accel energy fusion** — Brage 2004 (we have both inputs @1 Hz). Quantitative only with per-user HR calibration, else strong relative EE curve. `24/7 · MED`
 
 ### Temperature / multi-signal
-> **WHOOP 4: temperature is the raw `skinTempRaw` ADC** (layout; not verified as temperature). The temp items below run on it in ADC counts vs personal baseline, per-device calibrated (`temp_circadian.dart`); never °C. `nightlySkinTemp` measures the night's settled fraction, and only the readiness composite refuses temp below `kMinSettledFraction` (0.80). The illness flag, coverline, anomaly and glass-box readiness take a plain nightly series and apply no settled gate themselves.
+> **WHOOP 4: temperature is the raw `skinTempRaw` ADC** (layout; not verified as temperature). The temp items below run on it in ADC counts vs personal baseline, per-device calibrated (`temp_circadian.dart`); never °C. `nightlySkinTemp` returns absent (`unsettled_skin_temp`) when the night's settled fraction is below `kMinSettledFraction` (0.80) by default, so with defaults it gives a settled mean or null. Edge passes `minSettledFraction: 0` to keep the fraction and gates it in the readiness composite's `tempInput` instead. The illness flag, coverline, anomaly and glass-box readiness take a plain nightly series and apply no settled gate themselves.
 
 - **Wrist circadian-temp: cosinor + IS/IV** (RA/L5/M10 withheld: the series is median-centred, so the RA denominator can cross zero) — Sarabia/Madrid 2008. Per-sample cosinor with a motion de-mask, no settled gate; not wired in the app yet. Best-matched to our relative single-site sensor; no calibration. **Antiphase to core** — de-mask with activity/ambient. `24/7 · MED-HIGH (phase only)`
 - **Skin-temp z-score illness flag** — Smarr 2020 (relative, personal baseline). **Must be cycle-aware** (luteal +0.3 °C ≈ fever). Fuse, don't trust alone. `24/7 · MED`
