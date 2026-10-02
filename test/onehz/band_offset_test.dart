@@ -99,6 +99,34 @@ void main() {
         isNull);
   });
 
+  // Duplicate seconds (callers derive tsSec with tsMs ~/ 1000) must count once.
+  ({List<int> ts, List<int> band, int end}) _dupTail(
+      int tailSec, bool Function(int i) present) {
+    final ts = <int>[], band = <int>[];
+    for (var i = 0; i < 7 * 3600; i++) {
+      ts.add(_t0 + i);
+      band.add(2);
+    }
+    for (var i = 0; i < tailSec; i++) {
+      if (!present(i)) continue;
+      for (var r = 0; r < 2; r++) {
+        ts.add(_t0 + 7 * 3600 + i);
+        band.add(3);
+      }
+    }
+    return (ts: ts, band: band, end: _t0 + 7 * 3600 + tailSec);
+  }
+
+  test('duplicate rows cannot fake tail coverage', () {
+    final n = _dupTail(120 * 60, (i) => i.isEven); // 50 % distinct coverage
+    expect(_trim(n), isNull);
+  });
+
+  test('duplicate rows in an otherwise complete tail still trim', () {
+    final n = _dupTail(60 * 60, (_) => true);
+    expect(_trim(n), _t0 + 7 * 3600);
+  });
+
   test('stager and rule share one "sleep" code', () {
     expect(AdvancedSleepStager.bandStateAsleep, kBandStateSleep);
   });

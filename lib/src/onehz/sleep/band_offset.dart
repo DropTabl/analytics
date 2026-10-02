@@ -46,9 +46,13 @@ int? bandTrimmedOffsetSec({
 
   var knownSec = 0;
   int? lastSleepSec;
+  int? lastCounted; // tsSec is ascending: count each distinct second once
   for (var k = first; k < tsSec.length && tsSec[k] < endSec; k++) {
     if (!known(bandState[k])) continue;
-    knownSec++;
+    if (tsSec[k] != lastCounted) {
+      knownSec++;
+      lastCounted = tsSec[k];
+    }
     if (bandState[k] == kBandStateSleep) lastSleepSec = tsSec[k];
   }
   if (lastSleepSec == null) return null;
@@ -63,11 +67,17 @@ int? bandTrimmedOffsetSec({
   // (leading, internal and trailing all count) and no re-settling.
   var tailKnown = 0, stillSec = 0, maxGap = 0;
   var prevKnownTs = lastSleepSec; // the last SLEEP second itself was observed
+  int? lastTailCounted, lastStillCounted;
   for (var k = first; k < tsSec.length && tsSec[k] < endSec; k++) {
     final t = tsSec[k];
     if (t < newEnd || !known(bandState[k])) continue;
+    if (bandState[k] == kBandStateStill && t != lastStillCounted) {
+      stillSec++;
+      lastStillCounted = t;
+    }
+    if (t == lastTailCounted) continue;
+    lastTailCounted = t;
     tailKnown++;
-    if (bandState[k] == kBandStateStill) stillSec++;
     final gap = t - prevKnownTs - 1;
     if (gap > maxGap) maxGap = gap;
     prevKnownTs = t;
