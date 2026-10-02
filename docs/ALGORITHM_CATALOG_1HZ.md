@@ -11,7 +11,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 | Beat-to-beat RR (0–4/s, ms) | 1 Hz, R24 | verified |
 | Tri-axial accel (one vector/s) | 1 Hz, R24 v24/v12 (absent on v25) | layout; relative, not calibrated to 1 g |
 | Green PPG ADC (`ppgGreen`) | 1 Hz, R24 v24/v12 | layout; raw relative |
-| Red/IR ADC (`spo2RedRaw`/`spo2IrRaw`) | 1 Hz, R24 v24/v12 | layout, but ONE signal not two channels: red/IR ratios track drift, not oxygenation |
+| Red/IR ADC (`spo2RedRaw`/`spo2IrRaw`) | 1 Hz, R24 v24/v12 | layout; relative SpO₂ only, never a %. The two bytes move as one signal, so a red/IR ratio is low confidence |
 | "Ambient" ADC (`ambientRaw`) | 1 Hz, R24 v24/v12 | layout; raw counts, not validated as light |
 | Skin temperature | none | **unsupported**: `skinTempRaw` is deprecated (not temperature); no verified temperature field |
 | Skin contact / wear | none | **unsupported**: `skinContact` is deprecated (a float's exponent byte) |
@@ -29,7 +29,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 1. **PRV, not ECG-HRV** — pulse-rate variability; validate before any clinical claim.
 2. **1 Hz timing quantization** biases successive-difference metrics (RMSSD, pNNx) and the HF band most → lead with long-window/averaging metrics.
 3. **1 Hz accel can't do steps/cadence/gait/frequency-classification** (Nyquist: gait is 1.4–2.5 Hz > 0.5 Hz limit). Only an amplitude index + static orientation survive 24/7.
-4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline. On WHOOP 4 today there is no verified temperature or oxygenation input at all (see substrate table): temp- and SpO₂-based items below are **unsupported** until one exists.
+4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline. On WHOOP 4 today there is no verified temperature input at all (see substrate table): temp-based items below are **unsupported** until one exists. SpO₂ is supported as a relative signal only.
 5. **Sleep staging** from wrist is at best a 3-class autonomic *estimate*, never PSG 4-stage.
 6. **ACWR** is descriptive ("load vs your norm") only — not injury prediction (Lolli 2019 / Impellizzeri 2020).
 
@@ -69,7 +69,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 - **RSA respiratory rate from RR** — Lomb-Scargle HF-peak; Pimentel 2017 AR-order robustness. *Primary 24/7 respiration source.* `24/7 · HIGH`
 - **RIIV respiratory rate** — band-pass 0.1–0.5 Hz on 1 Hz green ADC; fuse with RSA via Karlen SD-gate. `24/7 · MED (layout-dependent: v24/v12 only)`
 - **CVHR / ACAT apnea screen** — Hayano 2011. RR-only, r≈0.84 vs AHI, zero calibration. Screen, not diagnosis; report night-to-night variability. `24/7 (run on RR) · HIGH for screening`
-- **Relative-R index + relative ODI** — ratio-of-ratios as rolling AC/DC (TI SLAA655); self-referential dip-count desaturation event rate. **Never display %SpO₂.** `UNSUPPORTED on WHOOP 4` — the red/IR bytes are one signal, so the ratio measures drift, not desaturation.
+- **Relative-R index + relative ODI** — ratio-of-ratios as rolling AC/DC (TI SLAA655); self-referential dip-count desaturation event rate. **Never display %SpO₂.** `24/7 · MED (relative only)`; on WHOOP 4 the red/IR bytes move as one signal, so keep it low confidence.
 - **Breathing-rate variability (BRV)** trend. `24/7 · MED`
 
 ### Motion / energy (1 Hz accel + HR)
@@ -107,7 +107,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 
 ## DO NOT SHIP (infeasible or refuted on our data)
 - Absolute SpO₂ % / absolute °C fever (relative signals).
-- Anything built on `skinTempRaw`, `skinContact`, `ppgRedIr`, a red/IR ratio, or R11 channels (see substrate table).
+- Anything built on `skinTempRaw`, `skinContact`, `ppgRedIr`, or R11 channels (see substrate table).
 - 1 Hz step counts / cadence / gait / frequency activity classification (Nyquist).
 - Cole-Kripke / Sadeh / Oakley raw coefficients on 1 Hz as a STANDALONE sleep/wake SCORE (count-calibration invalid; ZCM aliased away) — use van Hees + recalibrated ENMO surrogate. NOTE / documented exception: `advanced_stager.dart` (see the `ckWeights` comment block) does run the classic Cole-Kripke weights, but ONLY as an internal within-window onset/final-wake + sleep-epoch-subset SPINE, never as a final stage label; the hypnogram is produced by the Stage 1-3 HR/HRV/RR feature classifier + physiology reimposition, which corrects it. That deviation is deliberate and bounded — it does not violate this rule, which forbids shipping raw CK as the actual sleep/wake output.
 - ACWR/EWMA-ACWR as injury prediction (Lolli/Impellizzeri) — descriptive only.
@@ -118,7 +118,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 2. Nocturnal RHR → NightSignal/CUSUM illness; van Hees sleep window → SRI/WASO.
 3. lnRMSSD readiness stack + PRSA-DC + Lomb-Scargle 24-h spectrum (the RR structural edge).
 4. ENMO motion index + gravity-tilt sleep position; RSA + RIIV respiration; CVHR apnea screen.
-5. Cosinor/IS-IV-RA circadian (HR/activity); readiness composite; TRIMP/CTL-ATL-TSB. (Temp circadian, relative-ODI, menstrual coverline: unsupported on WHOOP 4.)
+5. Cosinor/IS-IV-RA circadian (HR/activity); relative-ODI; readiness composite; TRIMP/CTL-ATL-TSB. (Temp circadian, menstrual coverline: unsupported on WHOOP 4.)
 
 ---
 
@@ -162,7 +162,7 @@ The clinical core computes *metrics*; this layer turns them into things a regula
 - **Meditation effectiveness delta** [PUB physiology; HEUR composite] — paired pre/post RMSSD/HR on matched windows.
 - **Live workout: cadence + zones + HRR** [PUB autocorr cadence RRACE; ACSM zones; HRR] — motion-based → PPG-robust; flag PPG-HR unreliability under hard motion.
 - **Active stand test** [PUB 30:15 ratio ≥1.04] — gyro-anchored transition; trend (PPG jitter degrades absolute).
-- **Breath-hold game** [PUB diving reflex] — bradycardia only; no SpO₂ input on WHOOP 4 (red/IR is one signal), never a %.
+- **Breath-hold game** [PUB diving reflex] — relative SpO₂ droop + bradycardia; **never absolute %**.
 - Defer (over-claimable): flow/focus timer, Valsalva ratio.
 
 ## D. Self-quantification / narrative (24/7) — glass-box only
