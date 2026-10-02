@@ -763,6 +763,34 @@ void main() {
   // REGRESSION: degenerate (zero-dispersion) baseline columns must be dropped,
   // not floored to an epsilon scale.
   // -------------------------------------------------------------------------
+  group('multivariateAnomaly — correlation alignment (regression)', () {
+    test('a sparse temp column does not force the identity correlation', () {
+      // RHR and HRV move together (one autonomic axis). Tonight has only
+      // those two. PRE-FIX baseline rows needed all four features, so with
+      // temp/resp missing the correlation fell back to the identity and the
+      // shared shift was counted twice.
+      List<AnomalyFeatures> series({required bool withTempResp}) {
+        final f = <AnomalyFeatures>[];
+        for (var i = 0; i < 28; i++) {
+          final rhr = 58.0 + (i % 5 - 2) * 2;
+          f.add(AnomalyFeatures(
+              rhr: rhr,
+              hrv: 50 - (rhr - 58) * 1.5 + (i % 3 - 1) * 0.5,
+              temp: withTempResp ? 2000.0 + (i % 4) * 3 : null,
+              resp: withTempResp ? 14.0 + (i % 7) * 0.2 : null));
+        }
+        f.add(const AnomalyFeatures(rhr: 66, hrv: 38));
+        return f;
+      }
+
+      final dates = [for (var i = 0; i < 29; i++) 'd$i'];
+      final full = multivariateAnomaly(dates, series(withTempResp: true));
+      final sparse = multivariateAnomaly(dates, series(withTempResp: false));
+      expect(full[28].mahalanobis, isNotNull);
+      expect(sparse[28].mahalanobis, closeTo(full[28].mahalanobis!, 1e-9));
+    });
+  });
+
   group('multivariateAnomaly — degenerate baseline (regression)', () {
     test(
         'an exactly-constant baseline column is DROPPED, never floored to 1e-6',
