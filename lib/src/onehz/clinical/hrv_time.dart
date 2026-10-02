@@ -310,6 +310,87 @@ _JitterVerdict _judgeJitter(double? acf1, List<List<double>> nnRuns) {
   return _JitterVerdict(true, 0.0, j, _jitterNote(acf1, j));
 }
 
+/// Σ reported RR ÷ elapsed wall time above which the stream cannot be one
+/// heart's beats (it banks more beat-time than time passed): a double ingest or
+/// two interleaved streams. Contiguous runs measure 0.963 (gen4), 0.999 (W5),
+/// 1.001 (MG) — see rr_correction.dart `_beatTimes` — so 1.10 has margin.
+/// Duplicated beats add zero differences and DEFLATE RMSSD by ~1/√2;
+/// interleaved streams inflate it. Every other gate here passes both.
+const double kRrCoverageCeiling = 1.10;
+
+/// Shortest wall span [rrCoverage] will judge: whole-second stamps make a
+/// shorter one meaningless.
+const double kRrCoverageMinSpanSec = 600;
+
+/// How much beat-time an RR stream banks against the wall clock it spans.
+class RrCoverage {
+  /// Σ plausible RR ÷ wall span. Below 1 on any gap; above 1 is impossible
+  /// for one heart.
+  final double coverage;
+  final double sumRrSec;
+  final double spanSec;
+  final int beats;
+
+  /// Intervals outside [300, 2400] ms: counted, never summed.
+  final int implausibleBeats;
+
+  /// Exact (ts, rr) repeats of the previous beat. A DIAGNOSTIC only: on
+  /// whole-second stamps two equal beats in one record repeat legitimately.
+  final int duplicateBeats;
+  const RrCoverage({
+    required this.coverage,
+    required this.sumRrSec,
+    required this.spanSec,
+    required this.beats,
+    required this.implausibleBeats,
+    required this.duplicateBeats,
+  });
+  bool get overCounted => coverage > kRrCoverageCeiling;
+  Map<String, dynamic> toJson() => {
+        'rr_coverage': round6(coverage),
+        'sum_rr_sec': round6(sumRrSec),
+        'span_sec': round6(spanSec),
+        'beats': beats,
+        'implausible_beats': implausibleBeats,
+        'duplicate_beats': duplicateBeats,
+      };
+}
+
+/// [RrCoverage] of raw RR [rrMs] against their beat-END epoch times [rrTsMs]
+/// (time-sorted, same length). The span is `last − first + rrMs.first`: beat 0
+/// began before its end stamp. Null when fewer than 2 beats, the lengths
+/// differ, or the span is under [kRrCoverageMinSpanSec].
+RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
+  if (rrMs.length < 2 || rrMs.length != rrTsMs.length) return null;
+  final spanSec = (rrTsMs.last - rrTsMs.first + rrMs.first) / 1000.0;
+  if (!spanSec.isFinite || spanSec < kRrCoverageMinSpanSec) return null;
+  var sum = 0.0;
+  var implausible = 0;
+  var dup = 0;
+  for (var i = 0; i < rrMs.length; i++) {
+    final v = rrMs[i];
+    if (v >= 300 && v <= 2400) {
+      sum += v;
+    } else {
+      implausible++;
+    }
+    if (i > 0 && v == rrMs[i - 1] && rrTsMs[i] == rrTsMs[i - 1]) dup++;
+  }
+  final sumSec = sum / 1000.0;
+  return RrCoverage(
+    coverage: sumSec / spanSec,
+    sumRrSec: sumSec,
+    spanSec: spanSec,
+    beats: rrMs.length,
+    implausibleBeats: implausible,
+    duplicateBeats: dup,
+  );
+}
+
+String _overcountNote(RrCoverage c) =>
+    'rr_overcount:coverage=${round6(c.coverage)} — more beat-time than '
+    'elapsed time; the RR stream holds duplicated or interleaved beats';
+
 class HrvTime {
   final double? rmssd; // ms
   final double? sdnn; // ms
@@ -351,11 +432,14 @@ class HrvTime {
 /// `hrvFreq` and `irregularBeatScreen` already do. Returns an absent Metric when
 /// there are too few beats; RMSSD/pNN50 alone go null when the successive
 /// differences fail [kNnDiffAcf1Floor] and the spectrum does not show them to
-/// be breathing (`_judgeJitter`).
+/// be breathing (`_judgeJitter`), or when [coverage] (of the raw RR this NN
+/// was cleaned from) is [RrCoverage.overCounted]. Without [coverage] that last
+/// check is skipped.
 Metric<HrvTime> hrvTime(
   List<double> nnMs, {
   List<double>? nnTimesMs,
   double artifactFraction = 0.0,
+  RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned'];
   if (nnMs.length < 2) {
@@ -416,7 +500,8 @@ Metric<HrvTime> hrvTime(
   // always advised.
   final acf1 = nnDiffAcf1(runs);
   final verdict = _judgeJitter(acf1, levelRuns);
-  final jittery = verdict.refused;
+  final overCounted = coverage?.overCounted == true;
+  final jittery = verdict.refused || overCounted;
   final rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
   final pnn50 = (pairs > 0 && !jittery) ? 100.0 * nn50 / pairs : null;
   final sdnn = stddev(nnMs);
@@ -441,7 +526,7 @@ Metric<HrvTime> hrvTime(
   // swallow any penalty and re-clamp to 0.95 regardless.
   final conf = ((nnMs.length / 250.0).clamp(0.0, 1.0) // ~250 beats ≈ 5 min
           *
-          verdict.quality *
+          (overCounted ? 0.0 : verdict.quality) *
           (1 - artifactFraction))
       .clamp(0.3, 0.95);
   return Metric<HrvTime>(
@@ -459,8 +544,8 @@ Metric<HrvTime> hrvTime(
     tier: Tier.high,
     inputs_used: inputs,
     note: jittery
-        ? '${verdict.note}. SDNN/SDANN survive it and are the lead here. '
-            'PRV not ECG-HRV.'
+        ? '${overCounted ? _overcountNote(coverage!) : verdict.note}. '
+            'SDNN/SDANN survive it and are the lead here. PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
             '— lead with SDNN/SDANN'
             '${verdict.note == null ? '' : '. ${verdict.note}'}',
@@ -486,7 +571,8 @@ Metric<HrvTime> hrvTime(
 /// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
 /// PRV-not-ECG honesty note. Absent when there are too few usable windows, or
 /// when the night's successive differences fail [kNnDiffAcf1Floor] and the
-/// spectrum does not show them to be breathing (`_judgeJitter`). A window
+/// spectrum does not show them to be breathing (`_judgeJitter`), or when
+/// [coverage] (of the raw RR) is [RrCoverage.overCounted]. A window
 /// contributes only if it holds [minBeatsPerWindow] differences between beats
 /// that are ADJACENT IN TIME, not merely adjacent in the compacted NN list.
 Metric<double> nocturnalRmssd(
@@ -495,8 +581,16 @@ Metric<double> nocturnalRmssd(
   double windowMs = 300000.0,
   int minBeatsPerWindow = 5,
   List<bool>? stageMaskPerSec,
+  RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
+  if (coverage != null && coverage.overCounted) {
+    return Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: _overcountNote(coverage),
+    );
+  }
   if (nnMs.length != nnTimesMs.length || nnMs.length < minBeatsPerWindow + 1) {
     return const Metric<double>.absent(
       tier: Tier.high,
@@ -613,17 +707,20 @@ class SessionRmssd {
   final int windows; // 5-min windows that contributed
   final double? diffAcf1; // pooled over those windows
   final double? jitterShare; // [nnJitter] over the same windows
+  final double? rrCoverage; // [RrCoverage.coverage] of the session's beats
   const SessionRmssd({
     required this.rmssd,
     required this.windows,
     this.diffAcf1,
     this.jitterShare,
+    this.rrCoverage,
   });
   Map<String, dynamic> toJson() => {
         'rmssd_ms': round6(rmssd),
         'windows': windows,
         if (diffAcf1 != null) 'diff_acf1': round6(diffAcf1!),
         if (jitterShare != null) 'jitter_share': round6(jitterShare!),
+        if (rrCoverage != null) 'rr_coverage': round6(rrCoverage!),
       };
 }
 
@@ -640,7 +737,8 @@ class SessionRmssd {
 /// This is the nightly HEADLINE (→ `ln_rmssd` → readiness), so it refuses
 /// rather than approximates: absent when the successive differences fail
 /// [kNnDiffAcf1Floor] and the spectrum does not show them to be breathing
-/// (`_judgeJitter`).
+/// (`_judgeJitter`), and absent when the session's beats bank more time than
+/// elapsed ([kRrCoverageCeiling]).
 ///
 /// [rrMs]/[rrTsMs] are the raw RR intervals and their beat-end epoch times in
 /// milliseconds. [startSec]/[endSec] bound the chosen sleep session in epoch
@@ -691,12 +789,16 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
 
   final buckets = <int, List<double>>{};
   final bucketsTs = <int, List<double>>{};
+  final inRr = <double>[];
+  final inTs = <double>[];
   for (var i = 0; i < rrMs.length; i++) {
     final tsSec = (rrTsMs[i] / 1000.0).round();
     if (tsSec < startSec || tsSec >= endSec) continue;
     final idx = ((tsSec - startSec) ~/ windowSec);
     (buckets[idx] ??= <double>[]).add(rrMs[i]);
     (bucketsTs[idx] ??= <double>[]).add(rrTsMs[i]);
+    inRr.add(rrMs[i]);
+    inTs.add(rrTsMs[i]);
   }
 
   if (buckets.isEmpty) {
@@ -704,6 +806,14 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no RR beats inside the session window',
+    );
+  }
+  final cov = rrCoverage(inRr, inTs);
+  if (cov != null && cov.overCounted) {
+    return Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: _overcountNote(cov),
     );
   }
 
@@ -760,6 +870,7 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
       windows: rmssds.length,
       diffAcf1: acf1,
       jitterShare: verdict.jitter?.share,
+      rrCoverage: cov?.coverage,
     ),
     confidence: conf,
     tier: Tier.high,
