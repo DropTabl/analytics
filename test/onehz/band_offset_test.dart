@@ -23,7 +23,7 @@ int? _trim(({List<int> ts, List<int> band, int end}) n) => bandTrimmedOffsetSec(
 
 void main() {
   test('lie-in after waking: end moves to last SLEEP second + 1', () {
-    final n = _night([(2, 8 * 3600), (3, 70 * 60)]); // 2026-10-01 shape
+    final n = _night([(2, 8 * 3600), (3, 70 * 60)]); // lie-in after waking
     expect(_trim(n), _t0 + 8 * 3600);
   });
 
