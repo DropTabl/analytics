@@ -330,8 +330,13 @@ const Map<String, int> journalTagLagDays = {
 /// PER-TAG LAG ([tagLagDays], same reasoning as [journalFieldLagDays]): an
 /// outcome on day D is split by the tags logged on D − lag. A behaviour tag
 /// logged on D (alcohol, late meal) lands on the night ending the morning of
-/// D+1, so its outcome is D+1's. When lag ≠ 0 and D − lag has no journal row
-/// the day is dropped — we don't know whether the tag applied.
+/// D+1, so its outcome is D+1's. When D − lag has no journal row the day is
+/// dropped — we don't know whether the tag applied.
+///
+/// So [dates] must reach past the journal: pass every journal date AND the day
+/// after it (outcomes aligned to that union), or a lag-1 tag only counts when
+/// the day after it was journaled too, and someone who journals only on the
+/// nights they drink gets nothing at all. [journal] stays the real rows.
 List<JournalTagCorrelation> journalCorrelations({
   required List<JournalDay> journal,
   required List<String> dates,
@@ -393,15 +398,10 @@ List<JournalTagCorrelation> journalCorrelations({
       for (var i = 0; i < dates.length; i++) {
         final v = entry.value[i];
         if (v == null) continue;
-        final Set<String>? tags;
-        if (lag == 0) {
-          tags = tagByDate[dates[i]];
-        } else {
-          final src = shiftDayLabel(dates[i], -lag);
-          tags = src == null ? null : tagByDate[src];
-          if (tags == null) continue; // no row that day: unknown, not untagged
-        }
-        final hasTag = tags?.contains(tag) == true;
+        final src = lag == 0 ? dates[i] : shiftDayLabel(dates[i], -lag);
+        final tags = src == null ? null : tagByDate[src];
+        if (tags == null) continue; // no row that day: unknown, not untagged
+        final hasTag = tags.contains(tag);
         (hasTag ? tagged : untagged).add(v);
         vals.add(v);
         inGroup.add(hasTag);
