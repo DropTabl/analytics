@@ -521,9 +521,20 @@ Metric<double> strainScoreFromSeries(
 /// invalid minute repeats the previous value, 0 before the first valid one).
 ///
 /// Same arithmetic as [strainScoreFromSeries] in one pass, so `curve.last` is
-/// the headline and exercise already banked never falls back out: `exercise`
-/// only grows, and the living block is floored at 0. Null when
-/// [netTrimpAboveQuiet] would be null.
+/// the headline. Exercise already banked never falls back out: `exercise`
+/// only grows, so the curve never drops below what the exercise minutes alone
+/// score.
+///
+/// NOT MONOTONE, deliberately. Living minutes net among themselves, so
+/// positive living banked earlier (a busy morning above Q) can be netted back
+/// out by a quiet evening below it, and the curve declines by exactly that —
+/// e.g. 120 min at 0.30 HRR, 45 min at 145 bpm, then 735 min at 0.10 HRR
+/// (RHR 50, HRmax 187, Q 0.20) reads 10.74 at the end of the run and 9.38 at
+/// the end of the day. A running-max ratchet would hide that, but it would
+/// also bias every quiet day upward (the running max of a random walk around
+/// Q drifts up), which is the MOT-05 inflation [NetTrimp] exists to avoid.
+///
+/// Null when [netTrimpAboveQuiet] would be null.
 List<double>? strainCurveFromSeries(
   List<double> hrPerMin, {
   required double? restingHr,

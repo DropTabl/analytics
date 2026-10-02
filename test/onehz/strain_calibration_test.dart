@@ -350,6 +350,38 @@ void main() {
               .value);
     });
 
+    test('after the last exercise minute only ordinary living moves it', () {
+      // Positive living (0.30 HRR before the run) is banked in the living
+      // block, and a quiet evening below Q nets it back out — so the curve CAN
+      // decline after exercise. What it can never do is debit the exercise:
+      // the exercise contribution is fixed from the last exercise minute on,
+      // and the curve never drops below what that alone scores.
+      final hr = [
+        ...List<double>.filled(120, q(0.30)),
+        ...List<double>.filled(45, 145.0),
+        ...List<double>.filled(735, q(0.10)),
+      ];
+      final curve = strainCurveFromSeries(hr,
+          restingHr: rhr, maxHr: hrMax, quietHrr: 0.20, sex: Sex.male)!;
+      expect(curve[164], closeTo(10.74, 0.02));
+      expect(curve.last, closeTo(9.38, 0.02));
+      expect(
+          curve.last,
+          strainScoreFromSeries(hr,
+                  restingHr: rhr, maxHr: hrMax, quietHrr: 0.20, sex: Sex.male)
+              .value);
+      double exerciseUpTo(int i) => netTrimpAboveQuiet(hr.sublist(0, i + 1),
+              restingHr: rhr, maxHr: hrMax, quietHrr: 0.20, sex: Sex.male)!
+          .exercise;
+      final banked = exerciseUpTo(164);
+      for (var i = 165; i < hr.length; i += 15) {
+        expect(exerciseUpTo(i), banked, reason: 'minute $i');
+        expect(curve[i],
+            greaterThanOrEqualTo(strainFromNetTrimp(banked) - 1e-9),
+            reason: 'minute $i');
+      }
+    });
+
     test('an invalid minute repeats the previous value', () {
       final curve = strainCurveFromSeries([145, double.nan, 0, 145],
           restingHr: rhr, maxHr: hrMax, quietHrr: 0.20, sex: Sex.male)!;
