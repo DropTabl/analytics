@@ -34,6 +34,58 @@ List<double> beatEnds(List<double> nn, {double t0Ms = 0}) {
   return out;
 }
 
+/// Standard normal draw (Box–Muller).
+double gauss(math.Random r) {
+  final u = 1 - r.nextDouble(), v = r.nextDouble();
+  return math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * v);
+}
+
+/// [nn] re-measured with every beat TIME off by an independent N(0, σ²): the
+/// NN noise is a first difference (PSD 4σ²·sin²(πf), MSSD share 6σ²).
+List<double> timeJittered(List<double> nn, double sigmaMs, int seed) {
+  final r = math.Random(seed);
+  var t = 0.0;
+  final ts = <double>[sigmaMs * gauss(r)];
+  for (final v in nn) {
+    t += v;
+    ts.add(t + sigmaMs * gauss(r));
+  }
+  return [for (var i = 1; i < ts.length; i++) ts[i] - ts[i - 1]];
+}
+
+/// Mean squared successive difference.
+double mssdOf(List<double> x) {
+  var s = 0.0;
+  for (var i = 1; i < x.length; i++) {
+    s += (x[i] - x[i - 1]) * (x[i] - x[i - 1]);
+  }
+  return s / (x.length - 1);
+}
+
+/// 1 200 clean RSA beats (HR 48, 16 br/min), then 160 runs of 31 white-noise
+/// beats, each after a 5 s hole: no noisy run is long enough for a 64-beat
+/// Welch segment, yet they carry ~95 % of the successive-difference power.
+({List<double> nn, List<double> ends}) mixedNight() {
+  final rnd = math.Random(21);
+  final nn = rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50, beats: 1200);
+  final ends = <double>[];
+  var t = 1e12;
+  for (final v in nn) {
+    t += v;
+    ends.add(t);
+  }
+  for (var r = 0; r < 160; r++) {
+    t += 5000;
+    for (var i = 0; i < 31; i++) {
+      final v = 1250 + (rnd.nextDouble() - 0.5) * 330;
+      nn.add(v);
+      t += v;
+      ends.add(t);
+    }
+  }
+  return (nn: nn, ends: ends);
+}
+
 void main() {
   group('time-domain HRV (hand-computed)', () {
     test('RMSSD/SDNN/pNN50 on a constant-then-stepped NN series', () {
@@ -281,6 +333,107 @@ void main() {
       }
     });
 
+    test('short noisy runs cannot hide from the spectrum', () {
+      // The spectrum only sees runs of ≥ 64 beats. Diluting its MSSD with the
+      // short runs' power read the night as ~0 % jitter and published ~75 ms
+      // at 0.95 though ~95 % of the power was noise.
+      final m = mixedNight();
+      final h = hrvTime(m.nn, nnTimesMs: m.ends);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull);
+      expect(h.note, startsWith('rmssd_refused:acf1='));
+      expect(h.note, contains('the spectrum saw only'));
+      final n = nocturnalRmssd(m.nn, m.ends);
+      expect(n.present, isFalse);
+      expect(n.note, startsWith('rmssd_refused:acf1='));
+      final startSec = (m.ends.first / 1000).floor();
+      final endSec = (m.ends.last / 1000).ceil() + 1;
+      final s = sleepSessionRmssdDetail(m.nn, m.ends,
+          startSec: startSec, endSec: endSec);
+      expect(s.present, isFalse, reason: 'got ${s.value?.rmssd}');
+      expect(s.note, startsWith('rmssd_refused:acf1='));
+      final j = nnJitter([
+        m.nn.sublist(0, 1200),
+        for (var r = 0; r < 160; r++)
+          m.nn.sublist(1200 + r * 31, 1231 + r * 31)
+      ])!;
+      expect(j.coverage, lessThan(0.1));
+      expect(j.worstShare, greaterThan(0.9));
+    });
+
+    test('beat-TIME jitter at HR 45/48/50 is refused from a true share of 50 %',
+        () {
+      // The white-NN model alone read HR 48 / 16 br/min / ±30 ms with σ 30 ms
+      // timestamp jitter (true share 0.79) as 0.56 and admitted ~82 ms.
+      for (final c in [(48.0, 16.0, 30.0), (45.0, 16.0, 30.0), (50.0, 18.0, 30.0)]) {
+        final clean = rsaNn(hrBpm: c.$1, respBrpm: c.$2, ampMs: c.$3);
+        final m0 = mssdOf(clean);
+        for (final share in [0.5, 0.6, 0.8]) {
+          final sigma = math.sqrt(share * m0 / (6 * (1 - share)));
+          for (var seed = 1; seed <= 5; seed++) {
+            final h = hrvTime(timeJittered(clean, sigma, seed));
+            final why = 'HR ${c.$1}, ${c.$2} br/min, true share $share, '
+                'seed $seed: ${h.note}';
+            expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor), reason: why);
+            expect(h.value!.rmssd, isNull, reason: why);
+            expect(h.note, contains('broadband jitter floor'), reason: why);
+          }
+        }
+        // The same night with a minority of timestamp jitter is RSA, kept.
+        final sigma = math.sqrt(0.3 * m0 / (6 * 0.7));
+        expect(hrvTime(timeJittered(clean, sigma, 1)).value!.rmssd, isNotNull);
+      }
+    });
+
+    test('the share follows the true jitter fraction for both noise shapes', () {
+      final clean = rsaNn(hrBpm: 48, respBrpm: 16, ampMs: 50);
+      final m0 = mssdOf(clean);
+      final sigmaT = math.sqrt(0.79 * m0 / (6 * 0.21));
+      expect(nnJitter([timeJittered(clean, sigmaT, 2)])!.share,
+          closeTo(0.79, 0.05));
+      final r = math.Random(4);
+      final sigmaW = math.sqrt(0.39 * m0 / (2 * 0.61));
+      final white = [for (final v in clean) v + sigmaW * gauss(r)];
+      expect(nnJitter([white])!.share, closeTo(0.39, 0.05));
+      // 61 % physiology clears the margin: kept.
+      expect(hrvTime(white).value!.rmssd, isNotNull);
+    });
+
+    test('a failed rescue says WHICH test it failed', () {
+      // Excessive noise.
+      final rnd = math.Random(7);
+      final white = <double>[
+        for (var i = 0; i < 3000; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      expect(hrvTime(white).note, contains('broadband jitter floor'));
+      // Alternation: almost no floor, so no noise to blame.
+      final alt = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40.0 * (i.isEven ? 1 : -1)
+      ];
+      final a = hrvTime(alt);
+      expect(a.note, startsWith('rmssd_refused:acf1='));
+      expect(a.note, contains('beat-to-beat alternation'));
+      expect(a.note, isNot(contains('broadband')));
+      // Out-of-band structure: 0.4 cycles/beat at NN 500 ms is 48 br/min.
+      final fast = <double>[
+        for (var i = 0; i < 3000; i++) 500 + 40 * math.sin(2 * math.pi * 0.4 * i)
+      ];
+      final f = hrvTime(fast);
+      expect(f.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(f.value!.rmssd, isNull);
+      expect(f.note, contains('outside the 6–30 br/min breathing band'));
+      expect(f.note, isNot(contains('broadband')));
+      // Insufficient spectral evidence: too few segments.
+      final short = <double>[
+        for (var i = 0; i < 300; i++) 1000 + 40 * math.sin(2 * math.pi * i / 3)
+      ];
+      expect(hrvTime(short).note, contains('too few contiguous beats'));
+      // ... or too little of the power seen.
+      final m = mixedNight();
+      expect(hrvTime(m.nn, nnTimesMs: m.ends).note,
+          contains('the spectrum saw only'));
+    });
+
     test('nnJitter normalisation', () {
       // White noise of variance σ² has E[psd] = σ² and MSSD = 2σ², so share 1.
       final rnd = math.Random(7);
@@ -293,6 +446,13 @@ void main() {
       expect(rsa.peakHz!, closeTo(0.263, 0.02));
       expect(rsa.share, lessThan(0.05));
       expect(rsa.segments, 92);
+      expect(rsa.coverage, closeTo(1.0, 0.01),
+          reason: '1 run; only the last 24 beats fall outside a segment');
+      // Pure beat-TIME jitter reads as all jitter too.
+      expect(nnJitter([timeJittered(rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 0),
+                  20, 9)])!
+              .share,
+          closeTo(1.0, 0.1));
       expect(nnJitter([white.sublist(0, 300)]), isNull,
           reason: 'fewer than kJitterMinSegments segments');
     });
@@ -341,6 +501,28 @@ void main() {
       expect(c.implausibleBeats, 1);
       expect(c.coverage, closeTo(1199 / 1200, 1e-9));
       expect(c.overCounted, isFalse);
+    });
+
+    test('an implausible FIRST interval cannot widen the span', () {
+      // Every 8th beat duplicated reads 1.125 and is refused. A 65 535 ms
+      // glitch as the first interval used to stretch the span by 64.5 s while
+      // never being summed, and the same stream read ~1.07 and passed.
+      final rr = <double>[], ts = <double>[];
+      for (var i = 0; i < 1200; i++) {
+        final t = 1e12 + (i + 1) * 1000.0;
+        rr.add(1000.0);
+        ts.add(t);
+        if (i % 8 == 7) {
+          rr.add(1000.0);
+          ts.add(t);
+        }
+      }
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(1.125, 1e-3));
+      expect(rrCoverage(rr, ts)!.overCounted, isTrue);
+      rr[0] = 65535.0;
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.overCounted, isTrue, reason: 'coverage ${c.coverage}');
     });
 
     test('a gappy night reads well under 1 and is never refused for it', () {

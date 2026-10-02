@@ -34,8 +34,10 @@ import '../respiration/resp_rate.dart' show respLoHz, respHiHz;
 /// ACF1 = cos(2π·b) — below −0.35 once b > 0.307 (HR 48 at 16 br/min, HR 45 at
 /// 14), and exactly −0.5, the white-noise value, at b = 1/3. ACF1 is therefore
 /// only the cheap SCREEN; when it trips, `_judgeJitter` asks [nnJitter] for the
-/// white share directly and keeps a night whose differences are one breathing
-/// peak over a floor carrying ≤ [kJitterShareCeiling] of the MSSD. It is
+/// jitter share directly and keeps a night whose differences are one breathing
+/// peak over a floor carrying ≤ [kJitterShareCeiling] of the MSSD (with a
+/// margin for the estimate's spread), measured over ≥ [kJitterMinCoverage] of
+/// the difference power. It is
 /// deliberately the gate INSTEAD of a per-family constant
 /// (`device.dart`): the sensor difference is real and large, but it reaches us
 /// as something measurable, not as a label — a strap that starts reporting
@@ -90,20 +92,51 @@ double? nnDiffAcf1(List<List<double>> diffRuns) {
 double _acf1Quality(double? acf1) =>
     acf1 == null ? 1.0 : (1 - acf1 / kNnDiffAcf1Floor).clamp(0.0, 1.0);
 
-String _jitterNote(double acf1, [NnJitter? j]) =>
-    'rmssd_refused:acf1=${acf1.toStringAsFixed(3)}'
-    '${j == null ? '' : ',jitter_share=${j.share.toStringAsFixed(3)}'} — the '
-    'NN successive differences are essentially differenced white noise (−0.5 '
-    '= pure, floor $kNnDiffAcf1Floor)'
-    '${j == null ? '' : ' and a flat floor carries ${(100 * j.share).toStringAsFixed(1)} % of their power'}'
-    ', so RMSSD/pNN50 would measure beat-timing jitter, not vagal tone';
+String _pct(double x) => (100 * x).toStringAsFixed(1);
+
+/// Why the spectrum could not rescue a night the ACF1 screen refused.
+enum _JitterRefusal { evidence, noise, alternation, outOfBand }
+
+String _jitterNote(double acf1, NnJitter? j, _JitterRefusal why) {
+  final head = 'rmssd_refused:acf1=${acf1.toStringAsFixed(3)}'
+      '${j == null ? '' : ',jitter_share=${j.share.toStringAsFixed(3)}'}';
+  final body = switch (why) {
+    _JitterRefusal.evidence => j == null
+        ? 'the NN successive differences fail the jitter screen (floor '
+            '$kNnDiffAcf1Floor) and there are too few contiguous beats for the '
+            'beat-indexed spectrum ($kJitterMinSegments 64-beat segments) to '
+            'tell breathing from beat-timing jitter, so the refusal stands'
+        : 'the NN successive differences fail the jitter screen (floor '
+            '$kNnDiffAcf1Floor) and the spectrum saw only ${_pct(j.coverage)} % '
+            'of their power (it needs ${_pct(kJitterMinCoverage)} %; the rest '
+            'sits in runs too short to assess), so the refusal stands',
+    _JitterRefusal.noise =>
+      'a broadband jitter floor carries ${_pct(j!.worstShare)} % of the NN '
+          'successive-difference power (up to ${_pct(j.upperShare)} % within '
+          'the estimate\'s spread; ceiling ${_pct(kJitterShareCeiling)} %), so '
+          'RMSSD/pNN50 would measure beat-timing jitter, not vagal tone',
+    _JitterRefusal.alternation =>
+      'the NN successive differences fail the jitter screen and their '
+          'dominant structure is a beat-to-beat alternation '
+          '(${j!.peakCpb.toStringAsFixed(3)} cycles/beat) — ectopy or a '
+          'detector artefact, not resolvable breathing',
+    _JitterRefusal.outOfBand =>
+      'the NN successive differences fail the jitter screen and their '
+          'dominant peak'
+          '${j!.peakHz == null ? '' : ' (${(j.peakHz! * 60).toStringAsFixed(1)} br/min)'}'
+          ' lies outside the ${(respLoHz * 60).round()}–'
+          '${(respHiHz * 60).round()} br/min breathing band, so it is not '
+          'respiratory sinus arrhythmia',
+  };
+  return '$head — $body';
+}
 
 String _rsaKeptNote(double acf1, NnJitter j) =>
     'ACF1 ${acf1.toStringAsFixed(3)} is below the jitter floor, but the '
     'successive differences are a single respiratory peak '
-    '(${(j.peakHz! * 60).toStringAsFixed(1)} br/min) over a flat floor carrying '
-    '${(100 * j.share).toStringAsFixed(1)} % of the MSSD — RSA, not jitter; '
-    'RMSSD kept';
+    '(${(j.peakHz! * 60).toStringAsFixed(1)} br/min) over a jitter floor '
+    'carrying ${_pct(j.worstShare)} % of the MSSD (at most '
+    '${_pct(j.upperShare)} %) — RSA, not jitter; RMSSD kept';
 
 /// Beats per Welch segment for [nnJitter]'s beat-indexed spectrum, and the hop
 /// (50 % overlap, Welch 1967). Indexed by BEAT, not time: jitter is per beat and
@@ -117,11 +150,21 @@ const int _jitSegStep = 32;
 /// verdict stands unchanged.
 const int kJitterMinSegments = 16;
 
-/// The white-floor share of the MSSD above which RMSSD/pNN50 are refused. NOT a
-/// new knob: under the floor's own premise (uncorrelated physiological
-/// differences) ACF1 = −s/2, so −0.35 already meant s = 0.70. This measures s
-/// instead of inferring it from one lag.
-const double kJitterShareCeiling = 0.7;
+/// The largest jitter share of the MSSD a night the ACF1 screen refused may
+/// carry and still be rescued: physiology must carry the MAJORITY of what is
+/// published. Under the screen's own premise −0.35 meant a 70 % white share,
+/// but that premise is exactly what fails here, and a rescue overturns a
+/// refusal, so it holds itself to the stricter, symmetric line: more jitter
+/// than physiology is never published as vagal tone.
+const double kJitterShareCeiling = 0.5;
+
+/// Fewest share of the successive-difference power (Σd²) [nnJitter]'s spectrum
+/// must have SEEN before it may overrule the screen. Runs shorter than one
+/// 64-beat segment, and the tails of longer ones, are invisible to it; their
+/// power is charged as jitter in the worst case ([NnJitter.worstShare]), and
+/// below 90 % assessed the rescue is refused outright — a spectrum that saw
+/// a tenth or less of the evidence is not the judge of the rest.
+const double kJitterMinCoverage = 0.9;
 
 /// Search band for the dominant HF peak and the floor, cycles/beat. Below 0.1
 /// the LF/VLF physiology lives; differencing barely passes it anyway.
@@ -130,6 +173,11 @@ const double _jitLoCpb = 0.1;
 /// Bins excluded either side of the dominant peak when reading the floor.
 const int _jitPeakHalfWidth = 3;
 
+/// Lowest bin (0.25 cycles/beat) of the band the beat-TIME jitter model is fit
+/// on: there sin²(π·f) ≥ 0.5, so the fit is not dominated by dividing small
+/// low-frequency (LF/VLF) physiology by a near-zero model.
+const int _jitTimingLoBin = 16;
+
 /// A peak above this sits in the top two bins (≥ 0.47 cycles/beat): a
 /// beat-to-beat ALTERNATION (detector artefact, bigeminy), not resolvable RSA.
 /// Same reasoning as rsaRespRate refusing a peak at its own ceiling.
@@ -137,8 +185,13 @@ const double _jitMaxPeakCpb = 0.47;
 
 /// The night's beat-timing jitter, measured from the spectrum's SHAPE.
 class NnJitter {
-  /// Estimated fraction of the MSSD explained by a flat (white) floor, 0..1.
+  /// Estimated fraction of the ASSESSED MSSD explained by a jitter floor, 0..1:
+  /// the larger of the white-NN and the beat-time-jitter model.
   final double share;
+
+  /// Fraction of the successive-difference power (Σd²) inside the spectrum's
+  /// segments, 0..1.
+  final double coverage;
 
   /// Dominant peak in [0.1, 0.5] cycles/beat.
   final double peakCpb;
@@ -148,12 +201,28 @@ class NnJitter {
   final int segments;
   const NnJitter({
     required this.share,
+    required this.coverage,
     required this.peakCpb,
     this.peakHz,
     required this.segments,
   });
+
+  /// The jitter share of ALL the power, charging every unassessed difference
+  /// as jitter: `coverage·share + (1 − coverage)`.
+  double get worstShare => coverage * share + (1 - coverage);
+
+  /// [worstShare] plus a one-sided 99 % margin for the estimate's own spread:
+  /// `2.33 · 0.25 / √segments`. MEASURED (200 draws per point, white and
+  /// beat-time jitter at a true share of 0.5): the estimate's SD × √segments
+  /// is 0.18–0.23 from 16 to 200 segments, so 0.25 is a rounded-up bound. The
+  /// rescue judges this, so a night that is truly half jitter is not rescued
+  /// by a lucky draw — at 16 segments the margin is 0.15, over a whole night
+  /// (~900 segments) 0.02.
+  double get upperShare =>
+      worstShare + 2.33 * 0.25 / math.sqrt(segments.toDouble());
   Map<String, dynamic> toJson() => {
         'jitter_share': round6(share),
+        'jitter_coverage': round6(coverage),
         'jitter_peak_cpb': round6(peakCpb),
         if (peakHz != null) 'jitter_peak_hz': round6(peakHz!),
         'jitter_segments': segments,
@@ -183,17 +252,26 @@ final Float64List _jitSin = Float64List.fromList([
 /// the beat Nyquist (0.5 cycles/beat) and contributes exactly 2σ² to the MSSD;
 /// beat-TIME jitter is broadband too. Respiratory sinus arrhythmia is one
 /// narrow peak at the breathing frequency (Hirsch & Bishop 1981), and timing
-/// quantisation adds a broadband floor (Merri et al. 1990). So
-/// `share = 2·median(PSD over 0.1–0.5 cycles/beat, peak ±3 bins excluded) /
-/// MSSD` estimates the jitter fraction from the spectrum's shape, which no
-/// single autocorrelation lag can (at b = 1/3 pure RSA and pure noise share
-/// ACF1 = −0.5).
+/// quantisation adds a broadband floor (Merri et al. 1990). The jitter share
+/// is read from the spectrum's SHAPE, which no single autocorrelation lag can
+/// do (at b = 1/3 pure RSA and pure noise share ACF1 = −0.5), under the two
+/// noise shapes a beat stream carries, and the LARGER is kept:
+///   * white NN noise (variance σ²): flat PSD σ², MSSD share 2σ² —
+///     `2·median(PSD over 0.1–0.5 cycles/beat, peak ±3 bins excluded)`;
+///   * beat-TIME jitter (each timestamp off by an independent σ): NN noise is
+///     its first difference, PSD 4σ²·sin²(π·f), MSSD share 6σ² —
+///     `6·median(PSD/(4·sin²(π·f)) over 0.25–0.5 cycles/beat, peak excluded)`.
+///     The white model alone reads this shape low (measured 56 % for a true
+///     79 %), because the floor it sees is depressed below the band's middle.
 ///
 /// [nnRuns] are contiguous LEVEL runs (NN values of beats adjacent in time — a
 /// seam starts a new run). Welch 1967: 64-beat Hann segments, 50 % overlap,
-/// each linearly detrended; a segment never crosses a run boundary. The MSSD is
-/// pooled over exactly the within-run differences. Null when fewer than
-/// [kJitterMinSegments] segments fit, or the MSSD is zero.
+/// each linearly detrended; a segment never crosses a run boundary. The share
+/// is over the MSSD of exactly the differences inside those segments, and
+/// [NnJitter.coverage] says how much of ALL the within-run Σd² that is — runs
+/// too short for a segment are invisible to the spectrum and must not dilute
+/// it. Null when fewer than [kJitterMinSegments] segments fit, or the assessed
+/// MSSD is zero.
 NnJitter? nnJitter(List<List<double>> nnRuns) {
   const nb = _jitBins;
   final acc = Float64List(nb);
@@ -208,15 +286,22 @@ NnJitter? nnJitter(List<List<double>> nnRuns) {
   }
   final y = Float64List(_jitSegBeats);
   var segments = 0;
-  var ssd = 0.0;
+  var ssdAll = 0.0;
+  var ssd = 0.0; // inside the segments only
   var nd = 0;
   final levels = <double>[];
   for (final run in nnRuns) {
     levels.addAll(run);
+    // Beats [0, seen) are covered by this run's segments.
+    final fit = run.length - _jitSegBeats;
+    final seen = fit < 0 ? 0 : fit - fit % _jitSegStep + _jitSegBeats;
     for (var i = 1; i < run.length; i++) {
       final d = run[i] - run[i - 1];
-      ssd += d * d;
-      nd++;
+      ssdAll += d * d;
+      if (i < seen) {
+        ssd += d * d;
+        nd++;
+      }
     }
     for (var s = 0; s + _jitSegBeats <= run.length; s += _jitSegStep) {
       var mu = 0.0;
@@ -258,11 +343,18 @@ NnJitter? nnJitter(List<List<double>> nnRuns) {
     for (var k = kLo; k <= kHi; k++)
       if ((k - kPk).abs() > _jitPeakHalfWidth) psd[k]
   ];
-  final floor = median(floorBins)!;
+  final white = 2 * median(floorBins)!;
+  final timingBins = [
+    for (var k = _jitTimingLoBin; k <= kHi; k++)
+      if ((k - kPk).abs() > _jitPeakHalfWidth)
+        psd[k] / (4 * math.pow(math.sin(math.pi * k / _jitSegBeats), 2))
+  ];
+  final timing = timingBins.isEmpty ? 0.0 : 6 * median(timingBins)!;
   final peakCpb = kPk / _jitSegBeats;
   final medNn = median(levels);
   return NnJitter(
-    share: (2 * floor / mssd).clamp(0.0, 1.0),
+    share: (math.max(white, timing) / mssd).clamp(0.0, 1.0),
+    coverage: ssdAll > 0 ? (ssd / ssdAll).clamp(0.0, 1.0) : 1.0,
     peakCpb: peakCpb,
     peakHz: (medNn != null && medNn > 0) ? peakCpb / (medNn / 1000.0) : null,
     segments: segments,
@@ -284,30 +376,40 @@ class _JitterVerdict {
 
 /// ACF1 screens; the spectrum arbitrates only what the screen would refuse, so
 /// the set of refused nights can only SHRINK and a night at ACF1 ≥ −0.35 is
-/// judged exactly as before. Kept when the differences are one breathing peak
-/// ([respLoHz]–[respHiHz], below [_jitMaxPeakCpb]) over a white floor carrying
-/// ≤ [kJitterShareCeiling] of the MSSD; refused otherwise, and refused as
-/// before when there are too few segments to judge.
+/// judged exactly as before. Kept only when the spectrum saw ≥
+/// [kJitterMinCoverage] of the difference power, the worst-case jitter share
+/// (with its 99 % margin, [NnJitter.upperShare]) is ≤ [kJitterShareCeiling],
+/// and the dominant peak is breathing
+/// ([respLoHz]–[respHiHz], below [_jitMaxPeakCpb]); otherwise refused, with the
+/// cause in the note.
 _JitterVerdict _judgeJitter(double? acf1, List<List<double>> nnRuns) {
   final j = nnJitter(nnRuns);
   if (acf1 == null || acf1 >= kNnDiffAcf1Floor) {
     return _JitterVerdict(false, _acf1Quality(acf1), j, null);
   }
-  final breathing = j != null &&
-      j.share <= kJitterShareCeiling &&
-      j.peakCpb <= _jitMaxPeakCpb &&
-      j.peakHz != null &&
-      j.peakHz! >= respLoHz &&
-      j.peakHz! <= respHiHz;
-  if (breathing) {
+  final _JitterRefusal? why;
+  if (j == null || j.coverage < kJitterMinCoverage) {
+    why = _JitterRefusal.evidence;
+  } else if (j.upperShare > kJitterShareCeiling) {
+    why = _JitterRefusal.noise;
+  } else if (j.peakCpb > _jitMaxPeakCpb) {
+    why = _JitterRefusal.alternation;
+  } else if (j.peakHz == null ||
+      j.peakHz! < respLoHz ||
+      j.peakHz! > respHiHz) {
+    why = _JitterRefusal.outOfBand;
+  } else {
+    why = null;
+  }
+  if (why == null) {
     return _JitterVerdict(
       false,
-      (1 - j.share / kJitterShareCeiling).clamp(0.0, 1.0),
+      (1 - j!.worstShare / kJitterShareCeiling).clamp(0.0, 1.0),
       j,
       _rsaKeptNote(acf1, j),
     );
   }
-  return _JitterVerdict(true, 0.0, j, _jitterNote(acf1, j));
+  return _JitterVerdict(true, 0.0, j, _jitterNote(acf1, j, why));
 }
 
 /// Σ reported RR ÷ elapsed wall time above which the stream cannot be one
@@ -358,11 +460,17 @@ class RrCoverage {
 
 /// [RrCoverage] of raw RR [rrMs] against their beat-END epoch times [rrTsMs]
 /// (time-sorted, same length). The span is `last − first + rrMs.first`: beat 0
-/// began before its end stamp. Null when fewer than 2 beats, the lengths
-/// differ, or the span is under [kRrCoverageMinSpanSec].
+/// began before its end stamp — but only when that first interval is itself
+/// plausible. An implausible one is never summed, so it must not stretch the
+/// denominator either (a 65 535 ms glitch there hid a 12.5 % over-count).
+/// Null when fewer than 2 beats, the lengths differ, or the span is under
+/// [kRrCoverageMinSpanSec].
 RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
   if (rrMs.length < 2 || rrMs.length != rrTsMs.length) return null;
-  final spanSec = (rrTsMs.last - rrTsMs.first + rrMs.first) / 1000.0;
+  final first = rrMs.first;
+  final firstPlausible = first >= 300 && first <= 2400;
+  final spanSec =
+      (rrTsMs.last - rrTsMs.first + (firstPlausible ? first : 0)) / 1000.0;
   if (!spanSec.isFinite || spanSec < kRrCoverageMinSpanSec) return null;
   var sum = 0.0;
   var implausible = 0;
