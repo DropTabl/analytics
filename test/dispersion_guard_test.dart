@@ -30,6 +30,25 @@ void main() {
     test('an empty baseline (SD null) with a real quantum refuses', () {
       expect(dispersionBelowQuantum([], 1), isTrue);
     });
+
+    test('an off-grid (averaged, continuous) baseline is not quantized', () {
+      // nightly 30-min-mean RHR: tight but real, SD ~0.37 bpm.
+      expect(
+          dispersionBelowQuantum(
+              [52.1, 52.4, 51.8, 52.9, 52.3, 51.6, 52.0], 1),
+          isFalse);
+    });
+  });
+
+  test('readinessComposite keeps a tight continuous RHR baseline', () {
+    final base = <double>[
+      52.1, 52.4, 51.8, 52.9, 52.3, 51.6, 52.0, 52.7, 52.2, 51.9, 52.5, 52.3,
+      52.0, 52.6
+    ];
+    final m = readinessComposite([rhrInput(58.0, base)],
+        minInputs: 1, minWeightSum: 0.0);
+    expect(m.inputs_used, contains('RHR'));
+    expect(m.value!.score, lessThan(50));
   });
 
   group('readinessComposite still emits the byte-identical refusal string',

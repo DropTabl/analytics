@@ -84,8 +84,18 @@ RobustBaseline robustBaseline(List<double> window, {int minValid = 3}) {
 /// — a 14-night whole-bpm baseline alternating 58/59 has MAD 0.5 (robustZ
 /// succeeds) but SD ~0.52, exactly the unresolvable-dispersion case this
 /// exists to catch).
+///
+/// Only a baseline that actually SITS ON the quantum grid is quantized. The
+/// nightly producers (`nocturnalRhr`'s low30Mean, `nightlySkinTemp`'s mean)
+/// average ~1800 whole-unit samples, so their values are continuous: a tight
+/// but real between-night SD under one step is physiology there, not rounding,
+/// and refusing it dropped RHR from readiness on exactly the night it rose.
 bool dispersionBelowQuantum(List<double> base, double quantum) {
   if (quantum <= 0) return false;
+  for (final v in base) {
+    final q = v / quantum;
+    if ((q - q.roundToDouble()).abs() > 1e-9) return false; // off-grid
+  }
   final sd = stddev(base);
   return sd == null || sd < quantum;
 }
