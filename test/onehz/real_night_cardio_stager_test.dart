@@ -211,4 +211,20 @@ void _windowSeams() {
     expect(d, isNotEmpty);
     expect(d.every((x) => x == 0), isTrue);
   });
+
+  test('a window fragmented into one contiguous pair abstains', () {
+    // 20 clean beats, every gap a hole except one: plenty of beats, but only
+    // a single successive pair. RMSSD and R(k) must not publish from it.
+    final rr = <double>[for (var i = 0; i < 20; i++) i == 1 ? 820 : 800];
+    final ts = <double>[];
+    var t = 140000.0;
+    for (var i = 0; i < rr.length; i++) {
+      t += i == 1 ? 1000 : 5000;
+      ts.add(t);
+    }
+    expect(cleanBeatDiffsInWindowForTest(rr, ts, accel, 140, 170), [20]);
+    final w = windowRmssdRkForTest(rr, ts, accel, 140, 170);
+    expect(w.rmssd.isNaN, isTrue);
+    expect(w.rk, isNull);
+  });
 }

@@ -1018,7 +1018,10 @@ double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
     ss += d * d;
     pairs++;
   }
-  return pairs > 0 ? math.sqrt(ss / pairs) : double.nan;
+  // Gate on the successive pairs actually averaged, not the beat count: a
+  // window fragmented by holes/rejected beats can hold 5+ beats yet only one
+  // contiguous pair. 4 pairs = what the 5-beat gate meant before seams.
+  return pairs >= 4 ? math.sqrt(ss / pairs) : double.nan;
 }
 
 /// SDNN (ms) of cleaned RR beats over the SAME ±2.5-min window as
@@ -1152,6 +1155,14 @@ List<double> cleanBeatDiffsInWindowForTest(
   ];
 }
 
+/// [_windowRmssd] and the R(k) half of [_windowRemFeatures]. Test hook only.
+({double rmssd, double? rk}) windowRmssdRkForTest(List<double> rrMs,
+        List<double> rrTsMs, List<AccelSample> accel, int s, int t) =>
+    (
+      rmssd: _windowRmssd(rrMs, rrTsMs, accel, s, t, _epochSec),
+      rk: _windowRemFeatures(rrMs, rrTsMs, accel, s, t, _epochSec).rk,
+    );
+
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
 /// are re-labelled sleep (NREM). This is the published actigraphy step that
 /// prevents normal in-sleep repositioning from inflating WASO.
@@ -1271,7 +1282,8 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     }
     prevIhr = ihr;
   }
-  final rk = rkCnt > 0 ? rkSum / rkCnt : null;
+  // Same floor the 16-beat gate implied before seams were skipped: 15 pairs.
+  final rk = rkCnt >= 15 ? rkSum / rkCnt : null;
   // LF/HF via Lomb–Scargle on native beat times.
   double? lfhf;
   final spanSec = beatTsSec.last - beatTsSec.first;
