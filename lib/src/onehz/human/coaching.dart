@@ -339,7 +339,9 @@ String? journalTagDayForNight(String nightDay, String tag) =>
 /// outcome on day D is split by the tags logged on D − lag. A behaviour tag
 /// logged on D (alcohol, late meal) lands on the night ending the morning of
 /// D+1, so its outcome is D+1's. When D − lag has no journal row the day is
-/// dropped — we don't know whether the tag applied. A writer that tags a night
+/// dropped — we don't know whether the tag applied. [dates] must be
+/// `YYYY-MM-DD` for any tag with a non-zero lag; a label that can't be shifted
+/// drops the day the same way. A writer that tags a night
 /// after the fact (a cause picked on the wake day) must store each tag on
 /// [journalTagDayForNight], not on the wake day.
 ///
