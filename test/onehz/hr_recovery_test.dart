@@ -79,6 +79,40 @@ void main() {
       expect(m.confidence, closeTo(0.9, 1e-9));
     });
 
+    test('a hole around +60 s is not read as HRR-60', () {
+      // 0.5 bpm/s decay from 170, samples missing from +56 to +79 s. The first
+      // sample past +60 is +80 (HR 130), which would report a 40 bpm drop
+      // against a true HRR-60 of 30.
+      final hr = <int>[];
+      final ts = <int>[];
+      for (var i = 0; i < 30; i++) {
+        hr.add(170);
+        ts.add(i);
+      }
+      for (var s = 1; s <= 120; s++) {
+        if (s >= 56 && s <= 79) continue;
+        hr.add((170 - 0.5 * s).round());
+        ts.add(29 + s);
+      }
+      final m = hrRecovery(hr, endIndex: 29, tsSec: ts);
+      expect(m.present, isFalse);
+    });
+
+    test('a contiguous tail ending at +58 s still gives HRR-60', () {
+      final hr = <int>[];
+      final ts = <int>[];
+      for (var i = 0; i < 30; i++) {
+        hr.add(170);
+        ts.add(i);
+      }
+      for (var s = 1; s <= 58; s++) {
+        hr.add((170 - 0.5 * s).round());
+        ts.add(29 + s);
+      }
+      final m = hrRecovery(hr, endIndex: 29, tsSec: ts);
+      expect(m.present, isTrue, reason: m.note);
+    });
+
     test('tail too short to reach +60s → absent', () {
       final hr = [for (var i = 0; i < 40; i++) 160 - i];
       final m = hrRecovery(hr, endIndex: 10, recoverySec: 60);

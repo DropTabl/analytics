@@ -187,10 +187,10 @@ void _consolidateStages(List<SleepStage> sm, int epochSec) {
 
   // --- Step 1: bridge short NREM gaps INSIDE a genuine REM episode. ----------
   // Walk runs; a NREM run shorter than remGapEp is rescored to REM only when it
-  // is flanked on BOTH sides by SUBSTANTIAL REM runs (each ≥ remGapEp epochs) —
-  // i.e. it is a brief intrusion inside one sustained REM episode, not a stray
-  // single-epoch REM flicker sitting inside a NREM block (that flicker is left
-  // for step 2 to absorb into NREM).
+  // is flanked on BOTH sides by REM, the joined episode reaches remGapEp, and
+  // the flanking REM is at least as long as the gap — i.e. it is a brief
+  // intrusion inside one REM episode, not a NREM stretch between stray REM
+  // blips (those are left for step 2 to absorb into NREM).
   {
     // Precompute run boundaries.
     final runs = <List<int>>[];
@@ -214,11 +214,13 @@ void _consolidateStages(List<SleepStage> sm, int epochSec) {
       final right = (ri + 1 < runs.length && sm[runs[ri + 1][0]] == SleepStage.rem)
           ? runs[ri + 1][1] - runs[ri + 1][0]
           : 0;
-      // Bridge only when both sides are REM AND the COMBINED episode (the two
-      // flanking REM runs plus the gap) is a genuine REM episode ≥ remGapEp.
-      // This stitches an intrusion inside a real episode, but never fuses two
-      // single-epoch REM flickers that merely straddle a NREM stretch.
-      if (left > 0 && right > 0 && (left + right + gapLen) >= remGapEp) {
+      // Bridge only when both sides are REM, the joined episode is ≥ remGapEp,
+      // AND the REM outweighs the gap. Without that last check two 2-epoch
+      // blips around a 9-epoch NREM gap became 13 epochs of REM. Requiring
+      // left + right ≥ remGapEp instead cut the real Apple-Watch-labelled
+      // night from 150 to 87 min REM (truth 162); this costs it 5.
+      if (left > 0 && right > 0 && left + right >= gapLen &&
+          left + right + gapLen >= remGapEp) {
         for (var k = start; k < end; k++) {
           sm[k] = SleepStage.rem;
         }

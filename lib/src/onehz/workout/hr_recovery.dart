@@ -237,16 +237,27 @@ Metric<HrRecovery> hrRecovery(
     var t = -1;
     for (var i = end; i < times.length; i++) {
       if (i > end && times[i] - times[i - 1] > maxGapSec) break;
-      if (times[i] >= wantTs) {
-        t = i;
-        break;
-      }
+      // keep the last reachable sample: a tail ending at +58 s is still
+      // within the ±3 s check below.
+      t = i;
+      if (times[i] >= wantTs) break;
     }
     if (t < 0) {
       return Metric<HrRecovery>.absent(
         tier: Tier.estimate,
         inputs_used: inputs,
         note: 'HR tail does not reach +${recoverySec}s without a gap — no HRR',
+      );
+    }
+    // The first sample past +60 s can be up to maxGapSec late after a hole, and
+    // HR kept falling meanwhile. Take the nearer neighbour and require it
+    // inside the same ±3 s the median window uses.
+    if (t > end && wantTs - times[t - 1] < times[t] - wantTs) t--;
+    if ((times[t] - wantTs).abs() > 3) {
+      return Metric<HrRecovery>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'no HR sample within 3 s of +${recoverySec}s — no HRR',
       );
     }
     target = t;
