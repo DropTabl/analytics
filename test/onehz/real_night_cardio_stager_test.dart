@@ -46,6 +46,7 @@ import 'package:openstrap_analytics/onehz.dart';
 
 void main() {
   _windowEdgeTies();
+  _windowSeams();
 
   test('cardioStager on the real 2026-07 overnight capture matches Apple '
       'Watch ground truth within a wide band (regression: was wake=294min '
@@ -169,5 +170,61 @@ void _windowEdgeTies() {
     final got =
         cleanBeatsInWindowForTest(marked, ts, accel, 0, 30, halfWinMs: 5000);
     expect(got, [901, 902, 903, 904, 905, 906, 907]);
+  });
+}
+
+// A beat rejected by the step gate, or a hole in the RR stream, must end the
+// run: the beats either side of it are not successive, so RMSSD and R(k) must
+// never difference them.
+void _windowSeams() {
+  final accel = <AccelSample>[
+    for (var i = 0; i < 300; i++) AccelSample(i * 1000.0, 0, 0, 1)
+  ];
+  List<double> clock(List<double> rr, {int holeAt = -1}) {
+    final ts = <double>[];
+    var t = 0.0;
+    for (var i = 0; i < rr.length; i++) {
+      t += rr[i] + (i == holeAt ? 20000 : 0);
+      ts.add((t / 1000).floorToDouble() * 1000);
+    }
+    return ts;
+  }
+
+  test('step-rejected beat does not pair its neighbours', () {
+    final rr = <double>[
+      for (var i = 0; i < 40; i++) 800,
+      1001,
+      for (var i = 0; i < 40; i++) 1200,
+    ];
+    final d = cleanBeatDiffsInWindowForTest(rr, clock(rr), accel, 140, 170);
+    expect(d, isNotEmpty);
+    expect(d.every((x) => x.abs() <= 200), isTrue);
+  });
+
+  test('beats either side of an RR hole are not differenced', () {
+    final rr = <double>[
+      for (var i = 0; i < 40; i++) 800,
+      for (var i = 0; i < 40; i++) 950,
+    ];
+    final d = cleanBeatDiffsInWindowForTest(
+        rr, clock(rr, holeAt: 40), accel, 140, 170);
+    expect(d, isNotEmpty);
+    expect(d.every((x) => x == 0), isTrue);
+  });
+
+  test('a window fragmented into one contiguous pair abstains', () {
+    // 20 clean beats, every gap a hole except one: plenty of beats, but only
+    // a single successive pair. RMSSD and R(k) must not publish from it.
+    final rr = <double>[for (var i = 0; i < 20; i++) i == 1 ? 820 : 800];
+    final ts = <double>[];
+    var t = 140000.0;
+    for (var i = 0; i < rr.length; i++) {
+      t += i == 1 ? 1000 : 5000;
+      ts.add(t);
+    }
+    expect(cleanBeatDiffsInWindowForTest(rr, ts, accel, 140, 170), [20]);
+    final w = windowRmssdRkForTest(rr, ts, accel, 140, 170);
+    expect(w.rmssd.isNaN, isTrue);
+    expect(w.rk, isNull);
   });
 }

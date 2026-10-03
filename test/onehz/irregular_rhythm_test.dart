@@ -75,8 +75,11 @@ void main() {
       final times = <double>[];
       var windowStart = 0.0;
       for (final b in blocks) {
+        // Never step further than the beat itself, or every organised pair
+        // reads as a time hole and its window has no contiguous diffs.
+        final step = math.min(b.reduce(math.min), windowMs * 0.999 / b.length);
         for (var i = 0; i < b.length; i++) {
-          times.add(windowStart + (i / b.length) * windowMs * 0.999);
+          times.add(windowStart + i * step);
         }
         windowStart += windowMs;
       }
@@ -109,6 +112,86 @@ void main() {
         times.add(t);
       }
       final m = irregularBeatScreen(organised, nnTimesMs: times);
+      expect(m.value!.flag, isFalse);
+    });
+
+    test('beats either side of a time hole are not differenced', () {
+      // correctRr hands over a compacted series whose clock skips dropped runs
+      // and dropouts. Steady 1000 / 600 ms stretches split by 60 s holes: the
+      // only big jumps are across the holes, so SD1 and pNN70 must stay tiny.
+      final rr = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var s = 0; s < 40; s++) {
+        final base = s.isEven ? 1000.0 : 600.0;
+        t += 60000;
+        for (var i = 0; i < 60; i++) {
+          final v = base + 5 * math.sin(i / 3);
+          t += v;
+          rr.add(v);
+          times.add(t);
+        }
+      }
+      final m = irregularBeatScreen(rr, nnTimesMs: times);
+      expect(m.present, isTrue);
+      expect(m.value!.pnnPct, 0);
+      expect(m.value!.sd1, lessThan(10));
+      expect(m.value!.flag, isFalse);
+    });
+
+    // A 5-min slot of 42 in-range beats where only two pairs are contiguous
+    // (+75 / -75); every other beat sits behind a 3 s hole. 42 beats used to
+    // pass the 40-beat window gate with SD1/pNN70 built from those 2 diffs.
+    void fragmented(List<double> rr, List<double> times, double start) {
+      var t = start;
+      for (var i = 0; i < 42; i++) {
+        final v = i == 1
+            ? 975.0
+            : (i == 0 || i == 2 ? 900.0 : 840.0 + (i * 37) % 196);
+        t += i <= 2 ? v : v + 3000;
+        rr.add(v);
+        times.add(t);
+      }
+    }
+
+    test('beats split by holes are not a window: gate counts contiguous '
+        'pairs, not beats', () {
+      final rr = <double>[];
+      final times = <double>[];
+      for (var w = 0; w < 15; w++) {
+        fragmented(rr, times, w * 300000.0);
+      }
+      final m = irregularBeatScreen(rr, nnTimesMs: times);
+      expect(m.present, isFalse);
+    });
+
+    test('fragmented windows do not vote toward a sustained flag', () {
+      final rnd = math.Random(3);
+      final rr = <double>[];
+      final times = <double>[];
+      var slot = 0;
+      void contiguous(double Function() next) {
+        var t = slot++ * 300000.0;
+        while (t < (slot * 300000.0) - 2000) {
+          final v = next();
+          t += v;
+          rr.add(v);
+          times.add(t);
+        }
+      }
+      for (var w = 0; w < 3; w++) {
+        contiguous(() => 500.0 + rnd.nextInt(600));
+      }
+      for (var w = 0; w < 4; w++) {
+        contiguous(() => 800.0 + rnd.nextInt(10));
+      }
+      for (var w = 0; w < 6; w++) {
+        fragmented(rr, times, slot++ * 300000.0);
+      }
+      // 3 of 7 real windows irregular: not sustained. The 6 fragmented
+      // slots used to count as 6 more flagged windows (9 of 13).
+      final m = irregularBeatScreen(rr, nnTimesMs: times);
+      expect(m.present, isTrue);
       expect(m.value!.flag, isFalse);
     });
 
