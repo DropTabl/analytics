@@ -458,6 +458,39 @@ void main() {
       expect(st.nUntagged, 8);
     });
 
+    test('a cause tagged against a night lands on that night\'s outcome', () {
+      // "What was behind last night?" is answered on the wake day. Stored as
+      // is, a lag-1 tag pairs with the NEXT night and the rough one is left
+      // untagged. Stored via journalTagDayForNight it pairs with itself.
+      String label(int i) =>
+          DateTime.utc(2026, 3, 1 + i).toIso8601String().substring(0, 10);
+      final rough = {for (var i = 3; i < 20; i += 4) label(i)};
+      final byDay = <String, Set<String>>{
+        for (var i = 0; i < 20; i++) label(i): <String>{},
+      };
+      for (final night in rough) {
+        for (final t in ['alcohol', 'stress']) {
+          byDay[journalTagDayForNight(night, t)]!.add(t);
+        }
+      }
+      final out = journalCorrelations(
+        journal: [for (final e in byDay.entries) JournalDay(e.key, e.value)],
+        dates: [for (var i = 0; i < 20; i++) label(i)],
+        outcomes: {
+          'recovery': [
+            for (var i = 0; i < 20; i++) rough.contains(label(i)) ? 40.0 : 80.0
+          ],
+        },
+      );
+      for (final t in ['alcohol', 'stress']) {
+        final eff = out.firstWhere((c) => c.tag == t).effects.single;
+        expect(eff.nTagged, 5, reason: t);
+        expect(eff.delta, closeTo(-40, 1e-9), reason: t);
+      }
+      expect(journalTagDayForNight('2026-10-03', 'alcohol'), '2026-10-02');
+      expect(journalTagDayForNight('2026-10-03', 'stress'), '2026-10-03');
+    });
+
     test('empty journal yields no correlations', () {
       final out = journalCorrelations(
         journal: const [],

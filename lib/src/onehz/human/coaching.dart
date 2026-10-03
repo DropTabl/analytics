@@ -300,6 +300,14 @@ const Map<String, int> journalTagLagDays = {
   'sick': 0,
 };
 
+/// The journal day to store [tag] on when it is given as the cause of the
+/// night ending the morning of [nightDay] (the wake day, the outcome's own
+/// label). A lag-1 tag goes on the evening before, so [journalCorrelations]
+/// pairs it back with that night; writing it on [nightDay] pairs it with the
+/// night after. Null when [nightDay] is not a date.
+String? journalTagDayForNight(String nightDay, String tag) =>
+    shiftDayLabel(nightDay, -(journalTagLagDays[tag] ?? 0));
+
 /// Per-tag effect of a journal entry on each outcome series.
 ///
 /// [outcomes] values must be POSITIONALLY ALIGNED to [dates] (same length); a
@@ -331,7 +339,9 @@ const Map<String, int> journalTagLagDays = {
 /// outcome on day D is split by the tags logged on D − lag. A behaviour tag
 /// logged on D (alcohol, late meal) lands on the night ending the morning of
 /// D+1, so its outcome is D+1's. When D − lag has no journal row the day is
-/// dropped — we don't know whether the tag applied.
+/// dropped — we don't know whether the tag applied. A writer that tags a night
+/// after the fact (a cause picked on the wake day) must store each tag on
+/// [journalTagDayForNight], not on the wake day.
 ///
 /// So [dates] must reach past the journal: pass every journal date AND the day
 /// after it (outcomes aligned to that union), or a lag-1 tag only counts when
