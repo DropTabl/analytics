@@ -657,6 +657,32 @@ void main() {
       expect(high, greaterThan(50));
     });
 
+    test('FM breathing (14.5–17.5 br/min sweep) is RSA, not jitter', () {
+      // KNOWN FAILURE of the block-sinusoid estimator: one fixed-frequency
+      // sinusoid per block cannot follow breathing that drifts within it, so
+      // the drift reads as jitter and a noise-free night is refused.
+      final rr = <double>[];
+      var tSec = 0.0;
+      while (tSec < 7 * 3600) {
+        final v = 1250 +
+            50 *
+                math.sin(2 * math.pi * (16 / 60) * tSec +
+                    1.5 * (1 - math.cos(2 * math.pi * tSec / 60)));
+        rr.add(v);
+        tSec += v / 1000;
+      }
+      final ts = beatEnds(rr, t0Ms: 1e12);
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.rmssd, isNotNull, reason: h.note);
+      final n = nocturnalRmssd(rr, ts);
+      expect(n.present, isTrue, reason: n.note);
+      final s = sleepSessionRmssdDetail(rr, ts,
+          startSec: (ts.first / 1000).floor(),
+          endSec: (ts.last / 1000).ceil() + 1);
+      expect(s.present, isTrue, reason: s.note);
+      expect(s.value!.rmssd, closeTo(61.2, 2.0));
+    });
+
     test('a failed rescue says WHICH test it failed', () {
       // Excessive noise.
       final rnd = math.Random(7);
