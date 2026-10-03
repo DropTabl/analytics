@@ -454,22 +454,38 @@ Metric<double> nocturnalRmssd(
   );
 }
 
+/// Fewest successive differences a 5-min window needs before its RMSSD joins
+/// the nightly mean. RMSSD's relative sampling error is ~1/√(2n): 71 % at n = 1,
+/// 16 % at n = 20 (cf. night_hrv_shape.dart). The ultra-short-RMSSD literature
+/// (Munoz et al. 2015; Baek et al. 2015) puts the shortest usable recording at
+/// roughly 10–30 s — 20 differences is 20–25 s at a sleeping 48–60 bpm. The
+/// windows this drops are also the ones `_cleanWindowRuns` cannot Malik-filter
+/// (≤ 2 beats). A floor, not a weight: weighting by n would weight by HEART
+/// RATE, letting high-HR, low-RMSSD REM/arousal windows pull the mean down.
+const int kMinDiffsPerRmssdWindow = 20;
+
 /// The nightly headline RMSSD plus the diagnostics a `Metric<double>` cannot
 /// carry. Present only when the headline is.
 class SessionRmssd {
   final double rmssd; // ms — the headline
-  final int windows; // 5-min windows that contributed
+  final int windows; // 5-min windows that contributed (each ≥ the floor)
+  final int thinWindows; // windows dropped for 1..floor−1 differences
+  final int minDiffsPerWindow; // the floor, which travels with the number
   final double? diffAcf1; // pooled over those windows
   final double? rrCoverage; // [RrCoverage.coverage] of the session's beats
   const SessionRmssd({
     required this.rmssd,
     required this.windows,
+    required this.thinWindows,
+    required this.minDiffsPerWindow,
     this.diffAcf1,
     this.rrCoverage,
   });
   Map<String, dynamic> toJson() => {
         'rmssd_ms': round6(rmssd),
         'windows': windows,
+        'thin_windows': thinWindows,
+        'min_diffs_per_window': minDiffsPerWindow,
         if (diffAcf1 != null) 'diff_acf1': round6(diffAcf1!),
         if (rrCoverage != null) 'rr_coverage': round6(rrCoverage!),
       };
@@ -481,7 +497,13 @@ class SessionRmssd {
 /// Split the detected sleep session into consecutive 5-minute windows, apply a
 /// simple RR cleaner (range-filter [300, 2000] ms + Malik-style ectopic
 /// rejection against a local median), compute RMSSD inside each valid window,
-/// then return the ARITHMETIC MEAN across windows. This is intentionally
+/// then return the ARITHMETIC MEAN across windows. A window joins the mean only
+/// with at least [minDiffsPerWindow] clean successive differences
+/// ([kMinDiffsPerRmssdWindow]): an unweighted mean let a single |Δ| across an
+/// arousal or a dropout edge count as much as a full window of ~300, and those
+/// thin windows cluster where the signal is disturbed, so the bias was upward.
+/// Thin windows are counted ([SessionRmssd.thinWindows]), not silently lost,
+/// and contribute nothing to the jitter verdict either. This is intentionally
 /// distinct from [nocturnalRmssd], which uses cleaned NN +
 /// median-of-windows robustness.
 ///
@@ -500,9 +522,13 @@ Metric<double> sleepSessionWindowedRmssd(
   required int startSec,
   required int endSec,
   int windowSec = 300,
+  int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
 }) {
   final m = sleepSessionRmssdDetail(rrMs, rrTsMs,
-      startSec: startSec, endSec: endSec, windowSec: windowSec);
+      startSec: startSec,
+      endSec: endSec,
+      windowSec: windowSec,
+      minDiffsPerWindow: minDiffsPerWindow);
   return m.present
       ? Metric<double>(
           value: m.value!.rmssd,
@@ -523,6 +549,7 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
   required int startSec,
   required int endSec,
   int windowSec = 300,
+  int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
 }) {
   const inputs = ['rr_sleep_window'];
   if (startSec <= 0 ||
@@ -569,6 +596,7 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
 
   final rmssds = <double>[];
   final runs = <List<double>>[]; // pooled jitter floor — see [nocturnalRmssd]
+  var thinWindows = 0;
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     final diffRuns = [
@@ -584,6 +612,10 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
       }
     }
     if (nd == 0) continue;
+    if (nd < minDiffsPerWindow) {
+      thinWindows++; // counted, not silently lost — goes into detail + note
+      continue;
+    }
     runs.addAll(diffRuns);
     rmssds.add(math.sqrt(ssd / nd));
   }
@@ -600,10 +632,12 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     );
   }
   if (rmssds.isEmpty) {
-    return const Metric<SessionRmssd>.absent(
+    return Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'no valid 5-min windows for sleep-session RMSSD',
+      note: 'no valid 5-min windows for sleep-session RMSSD'
+          '${thinWindows == 0 ? '' : ' ($thinWindows window(s) had fewer than '
+              '$minDiffsPerWindow clean successive differences)'}',
     );
   }
 
@@ -614,6 +648,8 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     value: SessionRmssd(
       rmssd: meanRmssd,
       windows: rmssds.length,
+      thinWindows: thinWindows,
+      minDiffsPerWindow: minDiffsPerWindow,
       diffAcf1: acf1,
       rrCoverage: cov?.coverage,
     ),

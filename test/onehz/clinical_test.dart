@@ -995,6 +995,8 @@ void main() {
         startSec: 1,
         endSec: 601,
         windowSec: 300,
+        // mechanics test: window size is not what is under test
+        minDiffsPerWindow: 1,
       );
       expect(m.present, isTrue);
       expect(m.value, closeTo((15.8113883 + 79.0569415) / 2.0, 1e-6));
@@ -1003,7 +1005,9 @@ void main() {
     test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
       final rr = <double>[1000, 1000, 200, 1000, 1000];
       final ts = <double>[1000, 2000, 3000, 4000, 5000];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
     });
@@ -1017,7 +1021,9 @@ void main() {
       // (87.7 -> 58.2, 82.9 -> 53.0, 76.9 -> 48.4 ms) and 2-13 % on gen4.
       final rr = <double>[900, 900, 900, 200, 1000, 1000, 1000];
       final ts = <double>[for (var i = 0; i < 7; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
           reason: '2 runs of flat beats, no seam difference');
@@ -1052,10 +1058,83 @@ void main() {
         1000, 2000, 3000, // flat run before the gap
         123000, 124000, 125000, // flat run after a ~2 min dropout
       ];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
           reason: 'two flat runs, no cross-gap difference manufactured');
+    });
+
+    test('a 2-beat window with a 300 ms jump cannot move the headline', () {
+      const startSec = 1000000000; // windows are (tsSec − startSec) ~/ 300
+      final rr = <double>[], ts = <double>[];
+      var t = startSec * 1000.0; // beat-END epoch ms
+      // Six full 5-min windows of a smooth oscillation (period 12 beats,
+      // ±16 ms); 1800 beats are exactly 1 800 000 ms (150 whole periods).
+      for (var i = 0; i < 1800; i++) {
+        final v = 1000.0 + 16.0 * math.sin(2 * math.pi * i / 12);
+        t += v;
+        rr.add(v);
+        ts.add(t);
+      }
+      // The last beat ends at second 1800, excluded here by endSec and alone
+      // (no difference, so skipped either way) in window 6 below.
+      final base = sleepSessionWindowedRmssd(rr, ts,
+          startSec: startSec, endSec: startSec + 1800);
+      // Window 7 (seconds 2100–2399) holds only 2 beats, 1000 → 1300 ms. Both
+      // pass the range filter and, at ≤ 2 beats, no Malik test runs at all.
+      final t7 = (startSec + 2160) * 1000.0;
+      final rr2 = [...rr, 1000.0, 1300.0], ts2 = [...ts, t7, t7 + 1300];
+      final thin = sleepSessionWindowedRmssd(rr2, ts2,
+          startSec: startSec, endSec: startSec + 2400);
+      expect(base.present && thin.present, isTrue);
+      // per-window RMSSD = 2·16·sin(π/12)/√2 = 5.856 ms
+      expect(base.value!, closeTo(5.86, 0.05));
+      expect(thin.value!, closeTo(base.value!, 1e-9),
+          reason: 'was (6 × 5.86 + 300) / 7 ≈ 47.9');
+      final d = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: startSec, endSec: startSec + 2400);
+      expect(d.value!.windows, 6);
+      expect(d.value!.thinWindows, 1);
+      expect(d.value!.minDiffsPerWindow, kMinDiffsPerRmssdWindow);
+      expect(d.value!.toJson()['thin_windows'], 1);
+      expect(d.value!.toJson()['min_diffs_per_window'], 20);
+    });
+
+    test('19 differences do not count, 20 do', () {
+      ({List<double> rr, List<double> ts}) window(int beats) {
+        final rr = [
+          for (var i = 0; i < beats; i++)
+            1000.0 + 16.0 * math.sin(2 * math.pi * i / 12)
+        ];
+        return (rr: rr, ts: beatEnds(rr, t0Ms: 1000.0));
+      }
+
+      final a = window(21); // 20 Δ
+      final ma = sleepSessionRmssdDetail(a.rr, a.ts, startSec: 1, endSec: 301);
+      expect(ma.present, isTrue, reason: ma.note);
+      expect(ma.value!.windows, 1);
+      expect(ma.value!.thinWindows, 0);
+      final b = window(20); // 19 Δ
+      final mb = sleepSessionWindowedRmssd(b.rr, b.ts, startSec: 1, endSec: 301);
+      expect(mb.present, isFalse);
+      expect(mb.note, startsWith('no valid 5-min windows'));
+      expect(mb.note, contains('fewer than 20'));
+    });
+
+    test('the floor is a parameter', () {
+      final rr = [
+        for (var i = 0; i < 20; i++)
+          1000.0 + 16.0 * math.sin(2 * math.pi * i / 12)
+      ];
+      final m = sleepSessionWindowedRmssd(rr, beatEnds(rr, t0Ms: 1000.0),
+          startSec: 1, endSec: 301, minDiffsPerWindow: 19);
+      expect(m.present, isTrue);
+    });
+
+    test('kMinDiffsPerRmssdWindow is 20', () {
+      expect(kMinDiffsPerRmssdWindow, 20);
     });
 
     test('HRV-gap: no gap means no change (control)', () {
@@ -1063,7 +1142,9 @@ void main() {
       // gap) — the fix must not shrink a window that has nothing to exclude.
       final rr = <double>[900, 900, 900, 1000, 1000, 1000];
       final ts = <double>[1000, 2000, 3000, 4000, 5000, 6000];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       // One real seam difference (900 -> 1000 = 100 ms) survives; RMSSD = 100
       // over that single difference (the rest are 0).
