@@ -90,12 +90,17 @@ RobustBaseline robustBaseline(List<double> window, {int minValid = 3}) {
 /// average ~1800 whole-unit samples, so their values are continuous: a tight
 /// but real between-night SD under one step is physiology there, not rounding,
 /// and refusing it dropped RHR from readiness on exactly the night it rose.
+/// A MIXED history (whole-bpm imported nights + band nights) is still
+/// quantized while at least half of it sits on the grid: that is when MAD
+/// collapses, so one off-grid night must not switch the guard off.
 bool dispersionBelowQuantum(List<double> base, double quantum) {
   if (quantum <= 0) return false;
+  var onGrid = 0;
   for (final v in base) {
     final q = v / quantum;
-    if ((q - q.roundToDouble()).abs() > 1e-9) return false; // off-grid
+    if ((q - q.roundToDouble()).abs() <= 1e-9) onGrid++;
   }
+  if (onGrid * 2 < base.length) return false; // mostly continuous
   final sd = stddev(base);
   return sd == null || sd < quantum;
 }

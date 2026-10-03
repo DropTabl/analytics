@@ -38,6 +38,18 @@ void main() {
               [52.1, 52.4, 51.8, 52.9, 52.3, 51.6, 52.0], 1),
           isFalse);
     });
+
+    test('a mostly whole-bpm baseline with one off-grid night still refuses',
+        () {
+      // imported whole-bpm history + one band night (low30Mean).
+      final base = <double>[
+        58, 58, 58, 58, 58, 58, 58, 58, 59, 59, 58, 58, 58, 58.3
+      ];
+      expect(dispersionBelowQuantum(base, 1), isTrue);
+      final m = readinessComposite([rhrInput(61, base)],
+          minInputs: 1, minWeightSum: 0.0);
+      expect(m.inputs_used, isNot(contains('RHR')));
+    });
   });
 
   test('readinessComposite keeps a tight continuous RHR baseline', () {
