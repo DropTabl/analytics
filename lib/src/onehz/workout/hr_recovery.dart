@@ -237,10 +237,10 @@ Metric<HrRecovery> hrRecovery(
     var t = -1;
     for (var i = end; i < times.length; i++) {
       if (i > end && times[i] - times[i - 1] > maxGapSec) break;
-      if (times[i] >= wantTs) {
-        t = i;
-        break;
-      }
+      // keep the last reachable sample: a tail ending at +58 s is still
+      // within the ±3 s check below.
+      t = i;
+      if (times[i] >= wantTs) break;
     }
     if (t < 0) {
       return Metric<HrRecovery>.absent(

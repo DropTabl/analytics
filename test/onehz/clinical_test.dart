@@ -577,6 +577,19 @@ void main() {
       expect(m.present, isFalse);
       expect(m.note, contains('need_baseline'));
     });
+    test('one unparseable date label falls back to rows, not a mixed scale', () {
+      // calendarDays maps a bad label to its row index, which compared with
+      // epoch days drops that row from the window.
+      final hist = <double>[4.0, 4.05, 3.95, 4.0, 4.1, 3.9, 4.0, 3.5];
+      final dates = [
+        'n/a',
+        for (var d = 2; d <= 8; d++) '2026-08-0$d',
+      ];
+      final rows = readinessLnRmssd(hist, minNights: hist.length);
+      final m = readinessLnRmssd(hist, dates: dates, minNights: hist.length);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.z, rows.value!.z);
+    });
   });
 
   group('cosinor', () {

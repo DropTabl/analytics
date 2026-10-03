@@ -75,7 +75,11 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
   final List<double> priorWindow;
-  if (dates != null && dates.length == n) {
+  // all-or-nothing: calendarDays falls back to the row index for a label it
+  // can't parse, and an index compared against epoch days is meaningless.
+  if (dates != null &&
+      dates.length == n &&
+      dates.every((d) => DateTime.tryParse(d) != null)) {
     final day = calendarDays(dates);
     priorWindow = [
       for (var i = 0; i < n - 1; i++)
