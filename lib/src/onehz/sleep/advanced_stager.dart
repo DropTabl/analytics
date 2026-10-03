@@ -41,6 +41,7 @@ import '../util.dart';
 import '../clinical/hrv_time.dart';
 import 'cardio_stager.dart' show cardioStager;
 import 'accounting.dart' show SleepStage;
+import 'band_offset.dart';
 
 /// Which per-session staging engine [AdvancedSleepStager] runs. See the file
 /// header for the 2026-07 comparison behind this choice. Do not switch the
@@ -214,7 +215,7 @@ class AdvancedSleepStager {
   // Morning-stillness (#531)
   static const int morningStillnessWindowMin = 180;
   static const double morningReonsetRestingHRMult = 0.90;
-  static const int bandStateAsleep = 2;
+  static const int bandStateAsleep = kBandStateSleep;
   static const double morningReonsetBandAsleepFrac = 0.6;
 
   // Off-wrist (#500)
