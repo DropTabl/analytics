@@ -112,7 +112,15 @@ Metric<IrregularRhythm> irregularBeatScreen(
     for (var i = 0; i < rrMs.length; i++)
       if (keep[i]) successive[i]
   ];
-  if (nn.length < minBeats) {
+  // Poincaré descriptors — successive beats only (see [keep]).
+  final diffs = <double>[
+    for (var i = 1; i < rrMs.length; i++)
+      if (successive[i]) rrMs[i] - rrMs[i - 1]
+  ];
+  // Gate on the contiguous pairs actually averaged, not the beat count: a
+  // series fragmented by holes can hold minBeats beats yet only a handful of
+  // successive pairs, and SD1/pNNx would then come from those few diffs.
+  if (diffs.length < minBeats - 1) {
     return const Metric<IrregularRhythm>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
@@ -128,11 +136,6 @@ Metric<IrregularRhythm> irregularBeatScreen(
     );
   }
 
-  // Poincaré descriptors — successive beats only (see [keep]).
-  final diffs = <double>[
-    for (var i = 1; i < rrMs.length; i++)
-      if (successive[i]) rrMs[i] - rrMs[i - 1]
-  ];
   final sdsd = stddev(diffs);
   final sdnn = stddev(nn);
   if (sdsd == null || sdnn == null) {
@@ -263,15 +266,16 @@ bool _sustainedAcrossWindows(
   var bucket = <double>[];
   var bucketAdjacent = <bool>[];
   void flush() {
-    if (bucket.length >= minWindowBeats) {
+    // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
+    // across a beat that was dropped as an artifact in the original series,
+    // even though it's now a consecutive pair in this compacted bucket.
+    final diffs = <double>[
+      for (var i = 1; i < bucket.length; i++)
+        if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
+    ];
+    // Valid on contiguous pairs, not beats (same reason as the aggregate).
+    if (diffs.length >= minWindowBeats - 1) {
       validWindows++;
-      // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
-      // across a beat that was dropped as an artifact in the original series,
-      // even though it's now a consecutive pair in this compacted bucket.
-      final diffs = <double>[
-        for (var i = 1; i < bucket.length; i++)
-          if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
-      ];
       final sdsd = stddev(diffs);
       final sdnn = stddev(bucket);
       if (sdsd != null && sdnn != null) {
