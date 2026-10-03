@@ -424,9 +424,11 @@ class AdvancedSleepStager {
   /// whether it is sleep — we only label the stages within it. Staging itself
   /// runs through the SAME per-[method] code the auto path uses (see
   /// [StagingMethod]), so the single-source invariant holds (only the WINDOW
-  /// boundary is forced, never the staging math). Seconds with no data inside
-  /// [startSec, endSec) simply stay unstaged ('unobserved') — honest about
-  /// gaps, never fabricated.
+  /// boundary is forced, never the staging math). With [StagingMethod.cardio]
+  /// (the default), seconds with no data inside [startSec, endSec) simply stay
+  /// unstaged ('unobserved') — honest about gaps, never fabricated. The legacy
+  /// v1/v2 methods do not make that guarantee (a no-data window comes back as
+  /// 'light').
   static SleepSession stageWindow(
     int startSec,
     int endSec,
