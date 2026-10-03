@@ -352,6 +352,29 @@ void main() {
       expect(v.narrative.toLowerCase(), isNot(contains('noise')));
     });
 
+    test('narrative direction follows the raw value, not the oriented score',
+        () {
+      final hist = <double>[55, 56, 57, 58, 59, 55, 56, 57, 58, 59];
+      String say(double tonight) {
+        // ignore: deprecated_member_use_from_same_package
+        final m = glassBoxReadiness([
+          GlassBoxInput(
+              label: 'rhr',
+              value: tonight,
+              history: hist,
+              weight: wRhr,
+              lowerIsBetter: true),
+        ]);
+        return m.value!.narrative;
+      }
+
+      // a LOWER rhr lifts the score but the rhr itself went down.
+      expect(say(48), contains('resting heart rate is down'));
+      expect(say(66), contains('resting heart rate is up'));
+      // describes, never prescribes.
+      expect(say(66), isNot(contains('easier')));
+    });
+
     test('a whole-bpm quantized baseline is not named a driver even past 0.5*scale',
         () {
       // Alternating 58/59 bpm: MAD=0.5 -> scaled MAD ~0.74, so 0.5*scale ~0.37

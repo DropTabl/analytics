@@ -65,5 +65,30 @@ void main() {
           hrBaseline: List<double>.filled(120, 72));
       expect(w, isNull);
     });
+
+    test('an awake stretch ending at a recording hole is not bridged into', () {
+      // 3 h @50, 20 min @80, 6 min hole, 1 h @50. Pre-fix the look-ahead
+      // stopped on the hole, accepted the low sample after it, and the run
+      // ended on the last awake sample: offset t0+12000 instead of ~t0+10800.
+      final hr = <double>[];
+      final ts = <int>[];
+      const t0 = 1700000000;
+      var t = t0;
+      void seg(int secs, double bpm) {
+        for (var i = 0; i < secs; i++) {
+          hr.add(bpm);
+          ts.add(t++);
+        }
+      }
+      seg(3 * 3600, 50);
+      seg(20 * 60, 80);
+      t += 6 * 60;
+      seg(3600, 50);
+      final w = hrLedSleepWindow(hr, ts,
+          hrBaseline: List<double>.filled(120, 75));
+      expect(w, isNotNull);
+      expect(w!.offsetSec, lessThanOrEqualTo(t0 + 3 * 3600 + 300),
+          reason: 'pre-fix: t0+12000, the end of the awake stretch');
+    });
   });
 }
