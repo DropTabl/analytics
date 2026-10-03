@@ -94,15 +94,33 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // artifact beat the same way the aggregate diffs already do (see [keep]
   // note above) instead of just diffing consecutive elements of the
   // compacted array.
-  final nnAdjacent = <bool>[];
-  var prevKeptOrigIdx = -1;
-  for (var i = 0; i < rrMs.length; i++) {
-    if (keep[i]) {
-      nnAdjacent.add(prevKeptOrigIdx == i - 1);
-      prevKeptOrigIdx = i;
-    }
-  }
-  if (nn.length < minBeats) {
+  //
+  // Successive also means successive in TIME: callers pass `correctRr(...).nn`,
+  // which already dropped multi-beat artifact runs and re-anchored its clock
+  // across sensor dropouts, so two beats adjacent in the input can still sit
+  // either side of a hole. Same seam test as hrv_time.dart: a pair is
+  // contiguous iff the elapsed time between the two beat times is the interval.
+  final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
+  final successive = <bool>[
+    for (var i = 0; i < rrMs.length; i++)
+      i > 0 &&
+          keep[i] &&
+          keep[i - 1] &&
+          (!hasTimes || nnTimesMs[i] - nnTimesMs[i - 1] <= rrMs[i] + 0.5)
+  ];
+  final nnAdjacent = <bool>[
+    for (var i = 0; i < rrMs.length; i++)
+      if (keep[i]) successive[i]
+  ];
+  // Poincaré descriptors — successive beats only (see [keep]).
+  final diffs = <double>[
+    for (var i = 1; i < rrMs.length; i++)
+      if (successive[i]) rrMs[i] - rrMs[i - 1]
+  ];
+  // Gate on the contiguous pairs actually averaged, not the beat count: a
+  // series fragmented by holes can hold minBeats beats yet only a handful of
+  // successive pairs, and SD1/pNNx would then come from those few diffs.
+  if (diffs.length < minBeats - 1) {
     return const Metric<IrregularRhythm>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
@@ -118,11 +136,6 @@ Metric<IrregularRhythm> irregularBeatScreen(
     );
   }
 
-  // Poincaré descriptors — successive beats only (see [keep]).
-  final diffs = <double>[
-    for (var i = 1; i < rrMs.length; i++)
-      if (keep[i] && keep[i - 1]) rrMs[i] - rrMs[i - 1]
-  ];
   final sdsd = stddev(diffs);
   final sdnn = stddev(nn);
   if (sdsd == null || sdnn == null) {
@@ -171,7 +184,6 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // [keep] mask), not the raw input — an artifact beat the aggregate
   // correctly excludes must not be allowed back in here to inflate one
   // window's own ratio/pNN into a spurious per-window flag.
-  final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
   final nnTimes = hasTimes
       ? [
           for (var i = 0; i < rrMs.length; i++)
@@ -222,7 +234,8 @@ bool _sustainedAcrossWindows(
   List<double> rrMs,
   List<double> timesMs,
   // Aligned to [rrMs]: whether each beat was truly adjacent (no dropped
-  // artifact beat in between) to the previous one in the ORIGINAL series.
+  // artifact beat in between, no time hole) to the previous one in the
+  // ORIGINAL series.
   List<bool> adjacent, {
   required double sd1sd2Flag,
   required double pnnThresholdMs,
@@ -253,15 +266,16 @@ bool _sustainedAcrossWindows(
   var bucket = <double>[];
   var bucketAdjacent = <bool>[];
   void flush() {
-    if (bucket.length >= minWindowBeats) {
+    // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
+    // across a beat that was dropped as an artifact in the original series,
+    // even though it's now a consecutive pair in this compacted bucket.
+    final diffs = <double>[
+      for (var i = 1; i < bucket.length; i++)
+        if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
+    ];
+    // Valid on contiguous pairs, not beats (same reason as the aggregate).
+    if (diffs.length >= minWindowBeats - 1) {
       validWindows++;
-      // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
-      // across a beat that was dropped as an artifact in the original series,
-      // even though it's now a consecutive pair in this compacted bucket.
-      final diffs = <double>[
-        for (var i = 1; i < bucket.length; i++)
-          if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
-      ];
       final sdsd = stddev(diffs);
       final sdnn = stddev(bucket);
       if (sdsd != null && sdnn != null) {

@@ -71,10 +71,11 @@ const int sessionCostMinSessions = 10;
 
 /// Next-morning effect of each session type, one row per type.
 ///
-/// POSITIONAL ALIGNMENT, contiguous daily series, oldest first: [dates],
-/// [values] and [coverage] are index-aligned, and index i+1 is the morning
-/// AFTER index i. The caller passes the day series it already has; nothing here
-/// parses a date, so a local day label never has to survive a timezone.
+/// Daily series, oldest first: [dates], [values] and [coverage] are
+/// index-aligned. The series may skip days (an underived day has no row), so
+/// the morning after index i only counts when index i+1 is the NEXT calendar
+/// day, and the baseline window is [baselineDays] calendar days, not rows —
+/// see [calendarDays]. Labels are compared as plain dates, no timezone.
 ///
 /// [sessionTypesByDate] maps a day label to every session that started that
 /// day. A day with more than one entry is dropped, not split.
@@ -103,12 +104,14 @@ Metric<List<SessionMorningEffect>> sessionMorningEffects({
   }
 
   final deltasByType = <String, List<double>>{};
+  final day = calendarDays(dates);
   final mdcsByType = <String, List<double>>{};
 
   for (var i = 0; i + 1 < dates.length; i++) {
     final types = sessionTypesByDate[dates[i]];
     if (types == null || types.length != 1) continue; // none, or ambiguous
     final morning = i + 1;
+    if (day[morning] != day[i] + 1) continue; // a gap: not the next morning
     final v = values[morning];
     if (v == null) continue;
     if (coverage != null) {
@@ -117,9 +120,10 @@ Metric<List<SessionMorningEffect>> sessionMorningEffects({
     }
     // Baseline from the days BEFORE the morning, excluding the morning itself.
     // Including it would drag the baseline toward the very value under test.
-    final from = morning - baselineDays < 0 ? 0 : morning - baselineDays;
     final window = [
-      for (var k = from; k < morning; k++)
+      for (var k = morning - 1;
+          k >= 0 && day[morning] - day[k] <= baselineDays;
+          k--)
         if (values[k] != null) values[k]!
     ];
     if (window.length < minBaseline) continue;

@@ -44,6 +44,7 @@ import '../util.dart';
 import 'van_hees.dart';
 import 'accounting.dart' show SleepStage;
 import 'advanced_stager.dart';
+import 'band_offset.dart';
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
 const int _minQualifyingSleepSec = 3 * 3600;
@@ -279,6 +280,11 @@ class SleepSegmentation {
   /// dash for an absence that carries one of these.
   final String? absenceReason;
 
+  /// Seconds the band's last SLEEP removed from the END of the auto window;
+  /// null when the rule did not apply. Untrimmed end =
+  /// `window.offsetMs ~/ 1000 + bandOffsetTrimSec`.
+  final int? bandOffsetTrimSec;
+
   const SleepSegmentation({
     required this.window,
     required this.stages,
@@ -297,6 +303,7 @@ class SleepSegmentation {
     required this.longestSleepRunSec,
     required this.confidence,
     this.absenceReason,
+    this.bandOffsetTrimSec,
   });
 
   /// Honest "no qualifying sleep" result — all figures null, confidence 0.
@@ -362,6 +369,7 @@ class SleepSegmentation {
 
   Map<String, dynamic> toJson() => {
         'window': window?.toJson(),
+        if (bandOffsetTrimSec != null) 'band_offset_trim_sec': bandOffsetTrimSec,
         'tst_sec': tstSec,
         'waso_sec': wasoSec,
         'in_bed_sec': inBedSec,
@@ -416,6 +424,13 @@ SleepSegmentation segmentSleep(
   ({int onsetSec, int offsetSec})? forcedWindow,
   int? tzOffsetSec,
   int Function(int tsSec)? tzOffsetResolver,
+
+  /// Optional Gen5/MG band envelope, POSITIONAL 1:1 with [accel] (0 wake,
+  /// 1 still, 2 sleep, 3 up; anything else absent). AUTO path only: may END the
+  /// chosen night at the band's last SLEEP (see band_offset.dart). Never
+  /// creates, extends or stages a night. (AdvancedSleepStager.detectSleep takes
+  /// the same signal as [ts,state] pairs; not forwarded here.)
+  List<int>? bandSleepState,
 }) {
   final n = math.min(accel.length, hr1hz.length);
   // A forced window (manual entry / user confirmation, Approach 1) is asserted
@@ -476,7 +491,7 @@ SleepSegmentation segmentSleep(
         RrTs((rrTsMs[i] / 1000.0).round(), rrMs[i])
   ];
 
-  final _SleepGroup? chosen;
+  _SleepGroup? chosen;
   if (forcedWindow != null) {
     final onsetSec = forcedWindow.onsetSec;
     final offsetSec = forcedWindow.offsetSec;
@@ -508,6 +523,27 @@ SleepSegmentation segmentSleep(
   if (chosen == null) return SleepSegmentation.absent;
 
   final tsSec = [for (final a in trimmedAccel) a.tsMs ~/ 1000];
+  int? bandOffsetTrimSec;
+  if (forcedWindow == null &&
+      bandSleepState != null &&
+      bandSleepState.length >= n) {
+    final trimmedEnd = bandTrimmedOffsetSec(
+      startSec: chosen.start,
+      endSec: chosen.end,
+      tsSec: tsSec,
+      bandState: bandSleepState.sublist(0, n),
+      minNightSec: _minQualifyingSleepSec,
+    );
+    if (trimmedEnd != null) {
+      bandOffsetTrimSec = chosen.end - trimmedEnd;
+      chosen = _SleepGroup(
+        sessions: chosen.sessions,
+        start: chosen.start,
+        end: trimmedEnd,
+        asleepMin: chosen.asleepMin,
+      );
+    }
+  }
   final onset = _lowerBoundInt(tsSec, chosen.start);
   final offset = _lowerBoundInt(tsSec, chosen.end);
   final inBed = chosen.end - chosen.start;
@@ -561,10 +597,12 @@ SleepSegmentation segmentSleep(
     }
   }
   // Stamped LAST: an unobserved second has no stage, whatever a staging segment
-  // spanning the hole happened to claim.
+  // spanning the hole happened to claim. A second the stager left unstaged
+  // ('unobserved', e.g. a run it abstained on) is unobserved too, HR or not.
   var unobservedSec = 0;
   for (var i = 0; i < inBed; i++) {
-    if (observed[i]) continue;
+    if (observed[i] && stages4[i] != 'unobserved') continue;
+    observed[i] = false;
     stages4[i] = 'unobserved';
     unobservedSec++;
   }
@@ -717,6 +755,7 @@ SleepSegmentation segmentSleep(
     sustainedAwakenings: sustainedAwakenings,
     longestSleepRunSec: longestSleepRun,
     confidence: conf,
+    bandOffsetTrimSec: bandOffsetTrimSec,
   );
 }
 
