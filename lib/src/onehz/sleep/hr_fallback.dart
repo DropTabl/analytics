@@ -106,7 +106,12 @@ HrLedWindow? hrLedSleepWindow(
           (k == 0 || tsSec[k] - tsSec[k - 1] <= maxSampleGapSec)) {
         k++;
       }
-      if (k < n && low(k) && (tsSec[k] - tsSec[j]) < bridgeGapSec) {
+      // A look-ahead that stopped on a hole bridged nothing: taking k there
+      // would end the run on the awake stretch just before the hole.
+      if (k < n &&
+          low(k) &&
+          (tsSec[k] - tsSec[j]) < bridgeGapSec &&
+          tsSec[k] - tsSec[k - 1] <= maxSampleGapSec) {
         j = k;
       } else {
         break;

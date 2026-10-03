@@ -425,9 +425,11 @@ class AdvancedSleepStager {
   /// whether it is sleep — we only label the stages within it. Staging itself
   /// runs through the SAME per-[method] code the auto path uses (see
   /// [StagingMethod]), so the single-source invariant holds (only the WINDOW
-  /// boundary is forced, never the staging math). Seconds with no data inside
-  /// [startSec, endSec) simply stay unstaged (wake) — honest about gaps,
-  /// never fabricated.
+  /// boundary is forced, never the staging math). With [StagingMethod.cardio]
+  /// (the default), seconds with no data inside [startSec, endSec) simply stay
+  /// unstaged ('unobserved') — honest about gaps, never fabricated. The legacy
+  /// v1/v2 methods do not make that guarantee (a no-data window comes back as
+  /// 'light').
   static SleepSession stageWindow(
     int startSec,
     int endSec,
@@ -795,7 +797,8 @@ class AdvancedSleepStager {
     if (inBed <= 0) return 0;
     var wake = 0;
     for (final s in stages) {
-      if (s.stage == 'wake') wake += s.end - s.start;
+      // Unstaged seconds are not sleep either; they stay in the denominator.
+      if (s.stage == 'wake' || s.stage == 'unobserved') wake += s.end - s.start;
     }
     final asleep = math.max(0, inBed - wake);
     return math.min(1.0, asleep / inBed);
@@ -1408,7 +1411,7 @@ class AdvancedSleepStager {
   /// claims to separate sleep from wake. A carry-forward bounded by it can
   /// therefore never manufacture a scorable sleep bout on its own. Seconds past
   /// the bound are UNSTAGED: they are left out of staging entirely and reported
-  /// as wake.
+  /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
   /// DEFAULT staging path — delegates to `cardioStager` (cardio_stager.dart).
@@ -1425,20 +1428,22 @@ class AdvancedSleepStager {
   /// is split at those gaps and each contiguous usable RUN is staged on its own
   /// (so a dropout cannot pollute the neighbouring run's night baselines
   /// either); the gap seconds, runs too short to stage, and a window where
-  /// `cardioStager` itself abstains all come back as WAKE — the "stay unstaged"
-  /// contract [stageWindow] documents. They must NEVER come back as 'light',
-  /// which is what a zero-data window used to report for its entire length.
+  /// `cardioStager` itself abstains all come back as 'unobserved' — the "stay
+  /// unstaged" contract [stageWindow] documents. They must NEVER come back as
+  /// 'light', which is what a zero-data window used to report for its entire
+  /// length, and not as 'wake' either: an abstained run can still carry HR, so
+  /// `segmentSleep` would see it as observed and publish it as measured WASO.
   static List<StageSegment> _stageSessionCardio(int start, int end,
       List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
     final span = end - start;
     if (span <= 0) return const <StageSegment>[];
     final epSec = epochS.round();
     final minStageableSec = 3 * epSec;
-    if (span < minStageableSec) return [StageSegment(start, end, 'wake')];
+    if (span < minStageableSec) return [StageSegment(start, end, 'unobserved')];
 
     // Invalid samples are NOT samples: they must not seed `usable`, and they
     // must not become the source of a carry-forward. A second with only an
-    // undecoded vector falls through to the same unstaged→WAKE path as a
+    // undecoded vector falls through to the same unstaged→unobserved path as a
     // second with no row at all (cardioStager itself never reads
     // [AccelSample.valid], so it can only be protected here).
     final gByTs = <int, GravTs>{
@@ -1475,8 +1480,8 @@ class AdvancedSleepStager {
     final rrMs = [for (final r in rSeg) r.rrMs];
     final rrTsMs = [for (final r in rSeg) r.ts * 1000.0];
 
-    // Everything not staged below stays 'wake' — the honest default.
-    final perSec = List<String>.filled(span, 'wake');
+    // Everything not staged below stays 'unobserved' — no stage, no wake.
+    final perSec = List<String>.filled(span, 'unobserved');
     var i = 0;
     while (i < span) {
       if (!usable[i]) {

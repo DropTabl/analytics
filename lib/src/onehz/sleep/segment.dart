@@ -597,10 +597,12 @@ SleepSegmentation segmentSleep(
     }
   }
   // Stamped LAST: an unobserved second has no stage, whatever a staging segment
-  // spanning the hole happened to claim.
+  // spanning the hole happened to claim. A second the stager left unstaged
+  // ('unobserved', e.g. a run it abstained on) is unobserved too, HR or not.
   var unobservedSec = 0;
   for (var i = 0; i < inBed; i++) {
-    if (observed[i]) continue;
+    if (observed[i] && stages4[i] != 'unobserved') continue;
+    observed[i] = false;
     stages4[i] = 'unobserved';
     unobservedSec++;
   }
