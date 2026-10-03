@@ -3,6 +3,36 @@ import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+/// Respiratory sinus arrhythmia: NN sampled at its own beat times, so the
+/// breathing phase advances by the beat's real duration. Noise-free.
+List<double> rsaNn({
+  required double hrBpm,
+  required double respBrpm,
+  required double ampMs,
+  int beats = 3000,
+}) {
+  final base = 60000.0 / hrBpm, f = respBrpm / 60.0;
+  final out = <double>[];
+  var tSec = 0.0;
+  for (var i = 0; i < beats; i++) {
+    final v = base + ampMs * math.sin(2 * math.pi * f * tSec);
+    out.add(v);
+    tSec += v / 1000.0;
+  }
+  return out;
+}
+
+/// Cumulative beat-END times (ms) for [nn], starting at [t0Ms].
+List<double> beatEnds(List<double> nn, {double t0Ms = 0}) {
+  final out = <double>[];
+  var t = t0Ms;
+  for (final v in nn) {
+    t += v;
+    out.add(t);
+  }
+  return out;
+}
+
 void main() {
   group('time-domain HRV (hand-computed)', () {
     test('RMSSD/SDNN/pNN50 on a constant-then-stepped NN series', () {
@@ -91,6 +121,127 @@ void main() {
       expect(clean.pnn50, 0.0);
       // SDNN is a dispersion of levels, not of differences — unaffected.
       expect(clean.sdnn, closeTo(seamed.sdnn!, 1e-12));
+    });
+  });
+
+  group('RR over-count gate (Σ RR ÷ wall span)', () {
+    test('one beat per second reads 1.0; every beat duplicated reads 2.0', () {
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0]; // 20 min
+      final ts = [for (var i = 0; i < 1200; i++) 1e12 + (i + 1) * 1000.0];
+      final c = rrCoverage(rr, ts)!;
+      expect(c.coverage, closeTo(1.0, 1e-9));
+      expect(c.overCounted, isFalse);
+      expect(c.beats, 1200);
+      expect(c.duplicateBeats, 0);
+      final rr2 = [for (final v in rr) ...[v, v]];
+      final ts2 = [for (final t in ts) ...[t, t]];
+      final d = rrCoverage(rr2, ts2)!;
+      expect(d.coverage, closeTo(2.0, 1e-9));
+      expect(d.overCounted, isTrue);
+      expect(d.duplicateBeats, 1200);
+      expect(d.toJson()['rr_coverage'], closeTo(2.0, 1e-9));
+    });
+
+    test('under 10 min, mismatched or too few beats: null', () {
+      final rr = [for (var i = 0; i < 500; i++) 1000.0];
+      final ts = [for (var i = 0; i < 500; i++) (i + 1) * 1000.0];
+      expect(rrCoverage(rr, ts), isNull);
+      expect(rrCoverage([1000.0], [1000.0]), isNull);
+      expect(rrCoverage(rr, ts.sublist(1)), isNull);
+    });
+
+    test('an implausible interval is counted, never summed', () {
+      // One 65 535 ms glitch would otherwise fake an over-count.
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0]..[600] = 65535.0;
+      final ts = [for (var i = 0; i < 1200; i++) (i + 1) * 1000.0];
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.coverage, closeTo(1199 / 1200, 1e-9));
+      expect(c.overCounted, isFalse);
+    });
+
+    test('an implausible FIRST interval cannot widen the span', () {
+      // Every 8th beat duplicated reads 1.125 and is refused. A 65 535 ms
+      // glitch as the first interval used to stretch the span by 64.5 s while
+      // never being summed, and the same stream read ~1.07 and passed.
+      final rr = <double>[], ts = <double>[];
+      for (var i = 0; i < 1200; i++) {
+        final t = 1e12 + (i + 1) * 1000.0;
+        rr.add(1000.0);
+        ts.add(t);
+        if (i % 8 == 7) {
+          rr.add(1000.0);
+          ts.add(t);
+        }
+      }
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(1.125, 1e-3));
+      expect(rrCoverage(rr, ts)!.overCounted, isTrue);
+      rr[0] = 65535.0;
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.overCounted, isTrue, reason: 'coverage ${c.coverage}');
+    });
+
+    test('a gappy night reads well under 1 and is never refused for it', () {
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0];
+      final ts = [
+        for (var i = 0; i < 1200; i++) (i + 1) * 1000.0 + (i >= 600 ? 1.2e6 : 0)
+      ];
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(0.5, 1e-9));
+    });
+
+    test('the headline refuses an over-counted session', () {
+      // HR 60 / 12 br/min: the jitter screen keeps it, so the over-count is
+      // the only thing under test.
+      final rr = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 25200);
+      final ts = beatEnds(rr, t0Ms: 1e12);
+      final startSec = (ts.first / 1000).floor();
+      final endSec = (ts.last / 1000).ceil() + 1;
+      final ok = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: endSec);
+      expect(ok.present, isTrue, reason: ok.note);
+      expect(ok.value!.rmssd,
+          sleepSessionWindowedRmssd(rr, ts, startSec: startSec, endSec: endSec)
+              .value);
+      expect(ok.value!.rrCoverage!, closeTo(1.0, 0.01));
+      expect(ok.value!.windows, greaterThan(80));
+      expect(ok.value!.toJson()['rr_coverage'], closeTo(1.0, 0.01));
+
+      final rr2 = [for (final v in rr) ...[v, v]];
+      final ts2 = [for (final t in ts) ...[t, t]];
+      final dup = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: startSec, endSec: endSec);
+      expect(dup.present, isFalse);
+      expect(dup.note, startsWith('rr_overcount:coverage='));
+      expect(
+          sleepSessionWindowedRmssd(rr2, ts2,
+                  startSec: startSec, endSec: endSec)
+              .present,
+          isFalse);
+
+      final c = rrCoverage(rr2, ts2)!;
+      final h = hrvTime(rr2, coverage: c);
+      expect(h.value!.rmssd, isNull);
+      expect(h.value!.pnn50, isNull);
+      expect(h.value!.sdnn, isNotNull, reason: 'SDNN survives');
+      expect(h.note, startsWith('rr_overcount:coverage='));
+      final n = nocturnalRmssd(rr2, ts2, coverage: c);
+      expect(n.present, isFalse);
+      expect(n.note, startsWith('rr_overcount:coverage='));
+    });
+
+    test('no coverage handed over, or an honest one: no change', () {
+      final nn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30);
+      final t = beatEnds(nn, t0Ms: 1e12);
+      final c = rrCoverage(nn, t)!;
+      expect(c.overCounted, isFalse);
+      final a = hrvTime(nn, nnTimesMs: t);
+      final b = hrvTime(nn, nnTimesMs: t, coverage: c);
+      expect(b.value!.rmssd, a.value!.rmssd);
+      expect(b.confidence, a.confidence);
+      expect(b.note, a.note);
+      expect(nocturnalRmssd(nn, t, coverage: c).value,
+          nocturnalRmssd(nn, t).value);
     });
   });
 
