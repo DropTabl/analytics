@@ -1102,6 +1102,42 @@ void main() {
       expect(d.value!.toJson()['min_diffs_per_window'], 20);
     });
 
+    test('a discarded thin window does not reach the pooled ACF1 verdict', () {
+      // The floor drops a thin window from the MEAN; it must drop it from the
+      // jitter screen's pooled differences too. A 20-beat window (19
+      // differences, under the floor) alternating 910/1090 ms carries far
+      // more difference power than the six clean windows: pooled, it would
+      // drag ACF1 from ~0.866 to ~−0.78 and refuse a night it is not part of.
+      const startSec = 1000000000;
+      final rr = <double>[], ts = <double>[];
+      var t = startSec * 1000.0;
+      for (var i = 0; i < 1800; i++) {
+        final v = 1000.0 + 16.0 * math.sin(2 * math.pi * i / 12);
+        t += v;
+        rr.add(v);
+        ts.add(t);
+      }
+      final base = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: startSec + 2400);
+      var t7 = (startSec + 2110) * 1000.0;
+      final rr2 = [...rr], ts2 = [...ts];
+      for (var i = 0; i < 20; i++) {
+        final v = i.isEven ? 910.0 : 1090.0;
+        t7 += v;
+        rr2.add(v);
+        ts2.add(t7);
+      }
+      final thin = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: startSec, endSec: startSec + 2400);
+      expect(base.present && thin.present, isTrue, reason: thin.note);
+      expect(thin.value!.thinWindows, 1);
+      expect(thin.value!.windows, base.value!.windows);
+      expect(thin.value!.rmssd, closeTo(base.value!.rmssd, 1e-9));
+      expect(thin.value!.diffAcf1!, closeTo(0.863, 0.01));
+      expect(thin.value!.diffAcf1!, closeTo(base.value!.diffAcf1!, 1e-12));
+      expect(thin.confidence, base.confidence);
+    });
+
     test('19 differences do not count, 20 do', () {
       ({List<double> rr, List<double> ts}) window(int beats) {
         final rr = [
