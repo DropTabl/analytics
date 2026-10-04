@@ -282,6 +282,32 @@ class JournalTagCorrelation {
   const JournalTagCorrelation(this.tag, this.effects);
 }
 
+/// PER-TAG outcome lag, in days — the tag twin of [journalFieldLagDays].
+/// Behaviour during the day lands on the night that follows (+1); retrospective
+/// tags describe the night already over (0). Unlisted tags keep lag 0.
+const Map<String, int> journalTagLagDays = {
+  'caffeine': 1,
+  'alcohol': 1,
+  'late meal': 1,
+  'screens late': 1,
+  'sauna': 1,
+  'cold plunge': 1,
+  'workout': 1,
+  'social': 1,
+  'rest day': 1,
+  'stress': 0,
+  'poor sleep': 0,
+  'sick': 0,
+};
+
+/// The journal day to store [tag] on when it is given as the cause of the
+/// night ending the morning of [nightDay] (the wake day, the outcome's own
+/// label). A lag-1 tag goes on the evening before, so [journalCorrelations]
+/// pairs it back with that night; writing it on [nightDay] pairs it with the
+/// night after. Null when [nightDay] is not a date.
+String? journalTagDayForNight(String nightDay, String tag) =>
+    shiftDayLabel(nightDay, -(journalTagLagDays[tag] ?? 0));
+
 /// Per-tag effect of a journal entry on each outcome series.
 ///
 /// [outcomes] values must be POSITIONALLY ALIGNED to [dates] (same length); a
@@ -308,10 +334,26 @@ class JournalTagCorrelation {
 ///
 /// When both sides are exactly constant (pooled SD = 0) d is undefined and we
 /// require [minNForZeroSpread] observations per side before the floor passes.
+///
+/// PER-TAG LAG ([tagLagDays], same reasoning as [journalFieldLagDays]): an
+/// outcome on day D is split by the tags logged on D − lag. A behaviour tag
+/// logged on D (alcohol, late meal) lands on the night ending the morning of
+/// D+1, so its outcome is D+1's. When D − lag has no journal row the day is
+/// dropped — we don't know whether the tag applied. [dates] must be
+/// `YYYY-MM-DD` for any tag with a non-zero lag; a label that can't be shifted
+/// drops the day the same way. A writer that tags a night
+/// after the fact (a cause picked on the wake day) must store each tag on
+/// [journalTagDayForNight], not on the wake day.
+///
+/// So [dates] must reach past the journal: pass every journal date AND the day
+/// after it (outcomes aligned to that union), or a lag-1 tag only counts when
+/// the day after it was journaled too, and someone who journals only on the
+/// nights they drink gets nothing at all. [journal] stays the real rows.
 List<JournalTagCorrelation> journalCorrelations({
   required List<JournalDay> journal,
   required List<String> dates,
   required Map<String, List<double?>> outcomes,
+  Map<String, int> tagLagDays = journalTagLagDays,
   double minEffectPct = 3.0,
   double minCohensD = 0.5,
   int minNForZeroSpread = 3,
@@ -364,10 +406,14 @@ List<JournalTagCorrelation> journalCorrelations({
       final untagged = <double>[];
       final vals = <double>[];
       final inGroup = <bool>[];
+      final lag = tagLagDays[tag] ?? 0;
       for (var i = 0; i < dates.length; i++) {
         final v = entry.value[i];
         if (v == null) continue;
-        final hasTag = tagByDate[dates[i]]?.contains(tag) == true;
+        final src = lag == 0 ? dates[i] : shiftDayLabel(dates[i], -lag);
+        final tags = src == null ? null : tagByDate[src];
+        if (tags == null) continue; // no row that day: unknown, not untagged
+        final hasTag = tags.contains(tag);
         (hasTag ? tagged : untagged).add(v);
         vals.add(v);
         inGroup.add(hasTag);

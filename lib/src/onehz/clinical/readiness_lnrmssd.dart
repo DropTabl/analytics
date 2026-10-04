@@ -48,8 +48,12 @@ const int readinessLnRmssdMinNights = 4;
 /// [historyLnRmssd] trailing nightly ln(RMSSD), OLDEST→NEWEST, INCLUDING tonight
 /// as the last element. [meanNnTodayMs] tonight's mean NN (for the saturation
 /// guard; optional). [windowDays] rolling window (default 7).
+/// [dates] optional `yyyy-MM-dd` labels parallel to [historyLnRmssd]. Pass
+/// them: without them the window is the last [windowDays] ROWS, which after a
+/// wear gap are nights from weeks ago (see [calendarDays]).
 Metric<ReadinessLnRmssd> readinessLnRmssd(
   List<double> historyLnRmssd, {
+  List<String>? dates,
   double? meanNnTodayMs,
   int windowDays = 7,
   int minNights = readinessLnRmssdMinNights,
@@ -70,14 +74,30 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // pulls the mean/sd toward tonight, understating how far off a genuinely
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
-  final priorWindow = historyLnRmssd.sublist(start, n - 1);
-  if (priorWindow.isEmpty) {
-    // only happens if minNights got set to 1 somewhere - there's no prior
-    // night to build a baseline from yet, so same as not enough history.
+  final List<double> priorWindow;
+  // all-or-nothing: calendarDays falls back to the row index for a label it
+  // can't parse, and an index compared against epoch days is meaningless.
+  if (dates != null &&
+      dates.length == n &&
+      dates.every((d) => DateTime.tryParse(d) != null)) {
+    final day = calendarDays(dates);
+    priorWindow = [
+      for (var i = 0; i < n - 1; i++)
+        if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
+          historyLnRmssd[i]
+    ];
+  } else {
+    priorWindow = historyLnRmssd.sublist(start, n - 1);
+  }
+  if (priorWindow.isEmpty || priorWindow.length < minNights - 1) {
+    // empty only if minNights got set to 1 somewhere; short when a wear gap
+    // left too few nights inside the calendar window. either way there's no
+    // baseline yet, same as not enough history.
     return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: needBaselineNote(have: historyLnRmssd.length, need: minNights + 1),
+      note: needBaselineNote(
+          have: priorWindow.length + 1, need: minNights < 2 ? 2 : minNights),
     );
   }
   final m = mean(priorWindow)!;

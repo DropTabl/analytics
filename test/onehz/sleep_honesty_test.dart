@@ -2,7 +2,7 @@
 //
 // The core contract: absent input yields null / unstaged, NEVER a fabricated
 // value. `AdvancedSleepStager.stageWindow`'s own docstring promises "Seconds
-// with no data ... simply stay unstaged (wake) — honest about gaps, never
+// with no data ... simply stay unstaged — honest about gaps, never
 // fabricated". Every test here pins a place where the sleep code broke that
 // promise and reported a perfect night out of an empty or fragmented signal.
 //
@@ -636,6 +636,31 @@ void main() {
       expect(s.tstSec!, lessThanOrEqualTo(6 * 3600 - 7140),
           reason: 'pre-fix: 21600 — the dropouts were credited as Light');
       expect(s.stages4[90 * 60], 'unobserved');
+    });
+
+    test('a run the stager abstains on is unobserved, not measured WASO', () {
+      // Forced 8 h, still, HR 55. Two 120 s accel gaps (> the 60 s
+      // carry-forward) split it into 4 h / 2 h / 2 h runs, and the middle run's
+      // HR is on 5 min / off 6 min, under cardioStager's 50 % coverage floor,
+      // so it abstains there. Pre-fix the abstained run came back 'wake' and
+      // its HR-covered seconds were published as WASO: waso 3615, tst 21600.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      const gapA = 4 * 3600, gapB = 6 * 3600;
+      for (var k = 0; k < 8 * 3600; k++) {
+        final inGap =
+            (k >= gapA && k < gapA + 120) || (k >= gapB && k < gapB + 120);
+        if (inGap) continue;
+        accel.add(AccelSample((_t0 + k) * 1000.0, 0.005, 0.0, 1.0));
+        final mid = k >= gapA + 120 && k < gapB;
+        hr.add(mid && (k - gapA - 120) % 660 >= 300 ? 0.0 : 55.0);
+      }
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+      expect(s.present, isTrue);
+      expect(s.wasoSec, 0, reason: 'pre-fix: 3615 s of abstained run as WASO');
+      expect(s.stages4[5 * 3600], 'unobserved');
+      expect(s.unobservedSec!, greaterThan(7000));
     });
   });
 

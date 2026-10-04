@@ -215,6 +215,30 @@ void main() {
       expect(m.present, isFalse);
     });
 
+    test('the next ROW after a wear gap is not the next morning', () {
+      // Every session day is followed by two unworn days with no row, then an
+      // elevated morning. None of those mornings followed the session.
+      final all = _dates(120);
+      const noise = [0.0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      final dates = <String>[];
+      final values = <double?>[];
+      final sessions = <String, List<String>>{};
+      for (var d = 0; d < 120; d++) {
+        final c = d % 7; // 0..3 worn, 4..5 unworn, 6 = elevated morning
+        if (c == 4 || c == 5) continue;
+        dates.add(all[d]);
+        values.add(50.0 + noise[d % 10] + (c == 6 ? 10 : 0));
+        if (c == 3) sessions[all[d]] = ['football'];
+      }
+      final m = sessionMorningEffects(
+        dates: dates,
+        values: values,
+        metric: 'rhr',
+        sessionTypesByDate: sessions,
+      );
+      expect(m.present, isFalse);
+    });
+
     test('refuses under the minimum n rather than showing a small one', () {
       final dates = _dates(60);
       final m = sessionMorningEffects(

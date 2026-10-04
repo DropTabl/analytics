@@ -563,6 +563,33 @@ void main() {
       expect(flat.value!.z, isNull); // z is undefined at SD = 0
       expect(flat.value!.band, 'suppressed');
     });
+    test('with dates the baseline is the last 7 calendar days, not 7 rows', () {
+      // a week of nights in august, a 3-week wear gap, then two nights back.
+      final dates = [
+        for (var d = 1; d <= 7; d++) '2026-08-0$d',
+        '2026-08-29', '2026-08-30',
+      ];
+      final hist = <double>[4.0, 4.05, 3.95, 4.0, 4.1, 3.9, 4.0, 3.5, 3.2];
+      // positional: the august week is still "the last 7 nights".
+      expect(readinessLnRmssd(hist).present, isTrue);
+      // calendar: one prior night inside the window is no baseline.
+      final m = readinessLnRmssd(hist, dates: dates);
+      expect(m.present, isFalse);
+      expect(m.note, contains('need_baseline'));
+    });
+    test('one unparseable date label falls back to rows, not a mixed scale', () {
+      // calendarDays maps a bad label to its row index, which compared with
+      // epoch days drops that row from the window.
+      final hist = <double>[4.0, 4.05, 3.95, 4.0, 4.1, 3.9, 4.0, 3.5];
+      final dates = [
+        'n/a',
+        for (var d = 2; d <= 8; d++) '2026-08-0$d',
+      ];
+      final rows = readinessLnRmssd(hist, minNights: hist.length);
+      final m = readinessLnRmssd(hist, dates: dates, minNights: hist.length);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.z, rows.value!.z);
+    });
   });
 
   group('cosinor', () {
@@ -835,8 +862,10 @@ void main() {
         }
       }
 
-      addWindow([1000, 1010, 990], 1000.0); // bucket 0, RMSSD = 15.8113883...
-      addWindow([1000, 1050, 950], 301000.0); // bucket 1, RMSSD = 79.0569415...
+      // bucket 0: diffs 10,-20,10,10,-20 -> RMSSD sqrt(220)
+      addWindow([1000, 1010, 990, 1000, 1010, 990], 1000.0);
+      // bucket 1: diffs 50,-100,50,50,-100 -> RMSSD sqrt(5500)
+      addWindow([1000, 1050, 950, 1000, 1050, 950], 301000.0);
 
       final m = sleepSessionWindowedRmssd(
         rr,
@@ -846,12 +875,30 @@ void main() {
         windowSec: 300,
       );
       expect(m.present, isTrue);
-      expect(m.value, closeTo((15.8113883 + 79.0569415) / 2.0, 1e-6));
+      expect(m.value,
+          closeTo((math.sqrt(220.0) + math.sqrt(5500.0)) / 2.0, 1e-6));
+    });
+
+    test('a window with too few differences does not count', () {
+      // One window of +-10 ms alternation (RMSSD 10), plus a window holding a
+      // single 160 ms difference. Averaged in, that one difference would
+      // weigh as much as the whole real window.
+      final rr = <double>[
+        for (var i = 0; i < 10; i++) i.isEven ? 1000.0 : 1010.0,
+        900, 1060,
+      ];
+      final ts = <double>[
+        for (var i = 0; i < 10; i++) 1000.0 + i * 1000.0,
+        301000, 302000,
+      ];
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 601);
+      expect(m.present, isTrue);
+      expect(m.value, closeTo(10.0, 1e-9));
     });
 
     test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
-      final rr = <double>[1000, 1000, 200, 1000, 1000];
-      final ts = <double>[1000, 2000, 3000, 4000, 5000];
+      final rr = <double>[1000, 1000, 1000, 1000, 200, 1000, 1000, 1000];
+      final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
       final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
@@ -864,8 +911,8 @@ void main() {
       // every real Δ is 0. THIS is most of the "gen5 reads 2x gen4" gap: on the
       // real corpus it inflated the nightly headline by 51-102 % on MG
       // (87.7 -> 58.2, 82.9 -> 53.0, 76.9 -> 48.4 ms) and 2-13 % on gen4.
-      final rr = <double>[900, 900, 900, 200, 1000, 1000, 1000];
-      final ts = <double>[for (var i = 0; i < 7; i++) 1000.0 + i * 1000.0];
+      final rr = <double>[900, 900, 900, 900, 200, 1000, 1000, 1000];
+      final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
       final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
@@ -896,9 +943,9 @@ void main() {
       // land back-to-back in the compacted survivor list, so without the
       // timestamp gap check their genuinely-adjacent-in-time-but-not seam
       // would be differenced as if the beats were 1 s apart.
-      final rr = <double>[900, 900, 900, 1000, 1000, 1000];
+      final rr = <double>[900, 900, 900, 900, 1000, 1000, 1000];
       final ts = <double>[
-        1000, 2000, 3000, // flat run before the gap
+        1000, 2000, 3000, 4000, // flat run before the gap
         123000, 124000, 125000, // flat run after a ~2 min dropout
       ];
       final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
