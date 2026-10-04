@@ -92,6 +92,10 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// The guard is deliberately the top two bins, so a peak anywhere in
 /// ~0.477–0.5 cycles/beat is refused too (HR ~40 at 20 br/min lands there):
 /// at 64 beats a Hann line that close puts its main lobe on the Nyquist bin.
+/// Alternation that slips phase now and then is not a line but a hump centred
+/// on Nyquist, a few bins wide, and Welch scatter can put its peak lower. A
+/// real line at <= ~0.47 cycles/beat leaves the Nyquist bin on the Hann null,
+/// holding only the floor, so a Nyquist bin above 0.2x the peak is refused too.
 ///
 /// Diffs are weighted by the same Hann² coverage the spectrum gives them: a
 /// diff in the first or last few beats of a segment barely reaches the PSD, so
@@ -106,8 +110,8 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// 3.4x the median at worst, while an RSA line that clears the ceiling sits at
 /// 5x or more.
 ///
-/// Null (no verdict) on fewer than 20 segments, a peak in that top band, or
-/// no peak standing clear of the floor.
+/// Null (no verdict) on fewer than 20 segments, a peak in that top band, a
+/// Nyquist bin that rivals the peak, or no peak standing clear of the floor.
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
@@ -171,6 +175,7 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
     if (band[k] > band[peak]) peak = k;
   }
   if (peak + kLo >= kHi - 1) return null; // ~0.477–0.5 band, see above
+  if (band.last > 0.2 * band[peak]) return null; // hump on Nyquist, see above
   final med = median(band)!;
   if (band[peak] < 4.5 * med) return null; // no line, no exemption
   final floor = med / segs / w2;

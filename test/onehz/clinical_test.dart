@@ -114,6 +114,38 @@ void main() {
       }
     });
 
+    test('HRV-02: alternation that slips phase cannot pass as RSA', () {
+      // ±30 ms alternation that holds sign on 20% of beats: a hump centred on
+      // Nyquist rather than a line at it, so its Welch peak often lands below
+      // the top-two-bin guard.
+      for (var seed = 0; seed < 100; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        var s = 1.0;
+        final rr = <double>[];
+        final ts = <double>[];
+        var t = 0.0;
+        for (var i = 0; i < 1000; i++) {
+          if (rnd.nextDouble() >= 0.2) s = -s;
+          final v = 1333 + s * 30 + 5 * g();
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+        expect(hrvTime(rr, nnTimesMs: ts).value!.rmssd, isNull,
+            reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+        expect(
+            sleepSessionWindowedRmssd(rr, ts,
+                    startSec: 1, endSec: (t / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+      }
+    });
+
     test('HRV-02: noisier short runs cannot dilute the noise share', () {
       // Pure white noise, but fragmented: a few long runs at ±10 ms and many
       // 40-beat runs (too short for the spectrum) at 3x the amplitude. The
