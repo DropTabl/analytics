@@ -259,10 +259,11 @@ List<double> _clearedWindows(double? nightAcf1, List<double> rmssds,
 final _hann128 = [
   for (var i = 0; i < 128; i++) 0.5 - 0.5 * math.cos(2 * math.pi * i / 127)
 ];
+final _hann128Sq = _hann128.fold(0.0, (a, w) => a + w * w);
 
-/// Welch power (128-beat Hann, 50 % overlap) of one window's RR, rebuilt from
-/// its difference runs, at cycles-per-beat frequencies [f]. Null when no run
-/// holds a full segment.
+/// Welch power (128-beat Hann, 50 % overlap, averaged over segments) of one
+/// window's RR, rebuilt from its difference runs, at cycles-per-beat
+/// frequencies [f]. Null when no run holds a full segment.
 List<double>? _windowPsd(List<List<double>> diffRuns, List<double> f) {
   const n = 128;
   final p = List<double>.filled(f.length, 0.0);
@@ -294,7 +295,7 @@ List<double>? _windowPsd(List<List<double>> diffRuns, List<double> f) {
       segs++;
     }
   }
-  return segs == 0 ? null : p;
+  return segs == 0 ? null : [for (final v in p) v / segs];
 }
 
 /// Last resort for a night the jitter gate refused: the windows whose
@@ -332,6 +333,7 @@ List<int>? _steadyBreathingWindows(
   final byHz = List<double>.filled(fc.length, 0.0);
   final cover = List<int>.filled(fc.length, 0);
   final peakHz = <int, double>{}; // window -> its own peak, cycles per ms
+  final jit = <int, List<double>>{}; // window -> Hz-axis PSD over jitter shape
   for (var w = 0; w < winRuns.length; w++) {
     if (meanRrMs[w] <= 0) continue;
     final pb = _windowPsd(winRuns[w], fc);
@@ -350,6 +352,10 @@ List<int>? _steadyBreathingWindows(
       if (best < 0 || ph[j] > ph[best]) best = j;
     }
     if (best >= 0) peakHz[w] = fc[best] / ref;
+    jit[w] = [
+      for (var j = 0; j < fc.length; j++)
+        ph[j] / (2 - 2 * math.cos(2 * math.pi * math.min(fh[j], 0.5)))
+    ];
   }
   final nw = peakHz.length;
   if (nw < 12) return null;
@@ -381,7 +387,30 @@ List<int>? _steadyBreathingWindows(
     for (final e in peakHz.entries)
       if (math.log(e.value / f0).abs() <= 0.15) e.key
   ];
-  return keep.length >= 6 ? keep : null;
+  if (keep.length < 6) return null;
+  // The line proves breathing is there, not that it carries RMSSD: beat-time
+  // jitter loud enough to fail the gate would still be most of the number.
+  // Same ceiling as [nnDiffNoiseShare], over the kept windows. The floor is
+  // read as beat-time jitter σ², whose RR spectrum is σ²·(2 − 2cos ω) and
+  // whose differences carry 6σ², off the Hz pooling where the line is one
+  // narrow peak the median steps over. White RR noise reads louder here than
+  // it is, which can only refuse more.
+  var sq = 0.0;
+  final pooled = List<double>.filled(bins.length, 0.0);
+  for (final w in keep) {
+    var n = 0;
+    for (final r in winRuns[w]) {
+      for (final d in r) {
+        sq += d * d;
+        n++;
+      }
+    }
+    for (var i = 0; i < bins.length; i++) {
+      pooled[i] += jit[w]![bins[i]] * n;
+    }
+  }
+  final noise = 6 * median(pooled)! / _hann128Sq;
+  return noise < kNnDiffNoiseShareCeiling * sq ? keep : null;
 }
 
 /// The window RMSSDs a windowed headline publishes, or null for none: the

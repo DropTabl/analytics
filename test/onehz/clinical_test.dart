@@ -313,13 +313,14 @@ void main() {
 
     // 6 h at 18 br/min with beat-time jitter loud enough that the pooled
     // spectral exemption refuses; HR 50 ± [drift] bpm over a 3 h cycle.
-    (List<double>, List<double>) slowNight(int seed, double drift, double rsa) {
+    (List<double>, List<double>) slowNight(int seed, double drift, double rsa,
+        [double jitter = 60]) {
       final rnd = math.Random(seed);
       final rr = <double>[], ts = <double>[];
       var t = 0.0, e0 = 0.0;
       while (t < 6 * 3600e3) {
         final base = 60000 / (50 + drift * math.sin(2 * math.pi * t / 10800e3));
-        final e1 = (rnd.nextDouble() - 0.5) * 60;
+        final e1 = (rnd.nextDouble() - 0.5) * jitter;
         final v = base + rsa * math.sin(2 * math.pi * 0.3 * t / 1000) + e1 - e0;
         e0 = e1;
         t += v;
@@ -331,7 +332,7 @@ void main() {
 
     test('HRV-02: slow-heart RSA steady in Hz while HR drifts publishes', () {
       for (var seed = 0; seed < 2; seed++) {
-        final (rr, ts) = slowNight(seed, 8, 10);
+        final (rr, ts) = slowNight(seed, 8, 10, 20);
         final ss = sleepSessionWindowedRmssd(rr, ts,
             startSec: 1, endSec: (ts.last / 1000).floor());
         expect(ss.present, isTrue, reason: 'seed $seed');
@@ -348,6 +349,16 @@ void main() {
                 .present,
             isFalse,
             reason: 'seed $seed');
+        // A real line under jitter that is most of the RMSSD (~42 of ~44 ms
+        // here, RSA alone ~13): the line is there, the number is not.
+        final (lr, lt) = slowNight(seed, 8, 10);
+        expect(
+            sleepSessionWindowedRmssd(lr, lt,
+                    startSec: 1, endSec: (lt.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+        expect(nocturnalRmssd(lr, lt).present, isFalse, reason: 'seed $seed');
       }
     });
 
