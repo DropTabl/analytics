@@ -233,6 +233,45 @@ void main() {
       expect(ss.note, contains('rmssd_refused:acf1='));
     });
 
+    test('HRV-02: beat times on a coarse grid cannot pass as RSA', () {
+      // True RR ≈ 1013 ± 2 ms (RMSSD ~3), beat times rounded to 40 ms: RR
+      // flips between 1000 and 1040, a sawtooth line at 0.325 cycles/beat.
+      for (var seed = 0; seed < 6; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        var t = 0.0;
+        final tq = <double>[];
+        for (var i = 0; i <= 2400; i++) {
+          t += 1013 + 2 * g();
+          tq.add((t / 40).roundToDouble() * 40);
+        }
+        final rr = [for (var i = 1; i < tq.length; i++) tq[i] - tq[i - 1]];
+        final ts = tq.sublist(1);
+        final h = hrvTime(rr, nnTimesMs: ts);
+        expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+        expect(
+            sleepSessionWindowedRmssd(rr, ts,
+                    startSec: 1, endSec: (ts.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+      }
+      // Whole-ms RR is a lattice too, but far finer than the RSA it carries.
+      final rnd = math.Random(3);
+      final rr = <double>[
+        for (var i = 0; i < 4800; i++)
+          (1333 +
+                  30 * math.sin(2 * math.pi * i / 2.5) +
+                  (rnd.nextDouble() - 0.5) * 10)
+              .roundToDouble()
+      ];
+      expect(hrvTime(rr).value!.rmssd, isNotNull);
+    });
+
     test('HRV-02: normal-HR RSA is untouched by the jitter gate', () {
       // HR 60, 15 br/min = 4 beats/breath: ACF1 ≈ 0, never reaches the
       // spectral check.

@@ -117,7 +117,8 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 ///
 /// Null (no verdict) on fewer than 20 segments (or 15 effective), a peak in
 /// that top band, a Nyquist bin that rivals the peak, or no peak standing
-/// clear of the floor.
+/// clear of the floor, or diffs on a beat-time grid coarse against their size
+/// (see [_onCoarseLattice]).
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
@@ -179,6 +180,7 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
     }
   }
   if (segs < 20 || ssd == 0 || wsd == 0) return null;
+  if (_onCoarseLattice(diffRuns, ssd / nd)) return null;
   // One loud stretch dominates the average: count segments by power, not number.
   if (pSum * pSum / p2Sum < 15) return null;
   final band = psd.sublist(kLo);
@@ -194,6 +196,32 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   final vetted = wsd / wsum, all = ssd / nd;
   // 1 − (structured share of RMSSD²); equals 2σ²/mean(d²) when stationary.
   return 1 - (vetted - 2 * floor) / math.max(vetted, all);
+}
+
+/// True when every successive difference is a whole multiple of one step q and
+/// the mean squared difference is under 2q². Beat times rounded to a grid q
+/// make RR a two-level sequence on a near-constant heart: its differences are
+/// 0 or ±q, a deterministic sawtooth at frac(RR/q) cycles/beat, so it reads as
+/// one clean line and the white-floor test cannot see it. Rounding alone puts
+/// mean(d²) at 2·min(f, 1−f)·q² ≤ q², so under 2q² the grid, not the heart,
+/// sets RMSSD.
+// ponytail: exact lattice only; a grid re-rounded to whole ms (7.8 ms → 7/8)
+// breaks the common step and is not caught.
+bool _onCoarseLattice(List<List<double>> diffRuns, double msd) {
+  var q = double.infinity;
+  for (final r in diffRuns) {
+    for (final d in r) {
+      if (d.abs() > 1e-6 && d.abs() < q) q = d.abs();
+    }
+  }
+  if (q.isInfinite || msd >= 2 * q * q) return false;
+  for (final r in diffRuns) {
+    for (final d in r) {
+      final k = d.abs() / q;
+      if ((k - k.roundToDouble()).abs() > 1e-3) return false;
+    }
+  }
+  return true;
 }
 
 /// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND
