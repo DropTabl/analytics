@@ -393,7 +393,7 @@ List<int>? _steadyBreathingWindows(
   // wanders across the night and its line spreads with it, so each window
   // drops the bins of every rate the kept windows peaked at (plus a Hann
   // main lobe), mapped onto its own beats. σ² is the floor of what is left,
-  // pooled over windows and smoothed over two resolution cells.
+  // pooled over windows and smoothed over four resolution cells.
   var lo = double.infinity, hi = 0.0;
   for (final w in keep) {
     lo = math.min(lo, peakHz[w]!);
@@ -419,17 +419,19 @@ List<int>? _steadyBreathingWindows(
     }
   }
   var floor = double.infinity;
-  for (var j = 4; j < fc.length - 4; j++) {
+  for (var j = 8; j < fc.length - 8; j++) {
     var s = 0.0, m = 0;
-    for (var i = j - 4; i <= j + 4; i++) {
+    for (var i = j - 8; i <= j + 8; i++) {
       if (wt[i] < nAll / 2) break;
       s += acc[i] / wt[i];
       m++;
     }
-    if (m == 9) floor = math.min(floor, s / 9);
+    if (m == 17) floor = math.min(floor, s / 17);
   }
   if (floor == double.infinity) return null;
-  final noise = 6 * floor / _hann128Sq * nAll;
+  // The lowest stretch of a noisy curve reads below its mean; 1.1 puts the
+  // floor back at these pooled sizes, so jitter alone is not undercounted.
+  final noise = 1.1 * 6 * floor / _hann128Sq * nAll;
   return noise < kNnDiffNoiseShareCeiling * sq ? keep : null;
 }
 
