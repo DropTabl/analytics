@@ -333,7 +333,7 @@ List<int>? _steadyBreathingWindows(
   final byHz = List<double>.filled(fc.length, 0.0);
   final cover = List<int>.filled(fc.length, 0);
   final peakHz = <int, double>{}; // window -> its own peak, cycles per ms
-  final jit = <int, List<double>>{}; // window -> Hz-axis PSD over jitter shape
+  final psd = <int, List<double>>{}; // window -> its cycles-per-beat PSD
   for (var w = 0; w < winRuns.length; w++) {
     if (meanRrMs[w] <= 0) continue;
     final pb = _windowPsd(winRuns[w], fc);
@@ -352,10 +352,7 @@ List<int>? _steadyBreathingWindows(
       if (best < 0 || ph[j] > ph[best]) best = j;
     }
     if (best >= 0) peakHz[w] = fc[best] / ref;
-    jit[w] = [
-      for (var j = 0; j < fc.length; j++)
-        ph[j] / (2 - 2 * math.cos(2 * math.pi * math.min(fh[j], 0.5)))
-    ];
+    psd[w] = pb;
   }
   final nw = peakHz.length;
   if (nw < 12) return null;
@@ -390,13 +387,21 @@ List<int>? _steadyBreathingWindows(
   if (keep.length < 6) return null;
   // The line proves breathing is there, not that it carries RMSSD: beat-time
   // jitter loud enough to fail the gate would still be most of the number.
-  // Same ceiling as [nnDiffNoiseShare], over the kept windows. The floor is
-  // read as beat-time jitter σ², whose RR spectrum is σ²·(2 − 2cos ω) and
-  // whose differences carry 6σ², off the Hz pooling where the line is one
-  // narrow peak the median steps over. White RR noise reads louder here than
-  // it is, which can only refuse more.
-  var sq = 0.0;
-  final pooled = List<double>.filled(bins.length, 0.0);
+  // Same ceiling as [nnDiffNoiseShare], over the kept windows. Jitter σ² has
+  // an RR spectrum σ²·(2 − 2cos ω), flat once divided by that shape, and its
+  // differences carry 6σ²; physiology only adds power on top. Breathing
+  // wanders across the night and its line spreads with it, so each window
+  // drops the bins of every rate the kept windows peaked at (plus a Hann
+  // main lobe), mapped onto its own beats. σ² is the floor of what is left,
+  // pooled over windows and smoothed over two resolution cells.
+  var lo = double.infinity, hi = 0.0;
+  for (final w in keep) {
+    lo = math.min(lo, peakHz[w]!);
+    hi = math.max(hi, peakHz[w]!);
+  }
+  var sq = 0.0, nAll = 0;
+  final acc = List<double>.filled(fc.length, 0.0);
+  final wt = List<double>.filled(fc.length, 0.0);
   for (final w in keep) {
     var n = 0;
     for (final r in winRuns[w]) {
@@ -405,11 +410,26 @@ List<int>? _steadyBreathingWindows(
         n++;
       }
     }
-    for (var i = 0; i < bins.length; i++) {
-      pooled[i] += jit[w]![bins[i]] * n;
+    nAll += n;
+    final a = lo * meanRrMs[w] - 3 / 128, b = hi * meanRrMs[w] + 3 / 128;
+    for (var j = 0; j < fc.length; j++) {
+      if (fc[j] > a && fc[j] < b) continue;
+      acc[j] += n * psd[w]![j] / (2 - 2 * math.cos(2 * math.pi * fc[j]));
+      wt[j] += n;
     }
   }
-  final noise = 6 * median(pooled)! / _hann128Sq;
+  var floor = double.infinity;
+  for (var j = 4; j < fc.length - 4; j++) {
+    var s = 0.0, m = 0;
+    for (var i = j - 4; i <= j + 4; i++) {
+      if (wt[i] < nAll / 2) break;
+      s += acc[i] / wt[i];
+      m++;
+    }
+    if (m == 9) floor = math.min(floor, s / 9);
+  }
+  if (floor == double.infinity) return null;
+  final noise = 6 * floor / _hann128Sq * nAll;
   return noise < kNnDiffNoiseShareCeiling * sq ? keep : null;
 }
 
