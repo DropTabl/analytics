@@ -100,7 +100,14 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// Energy the spectrum never vets (edges, tails, too-short runs) above what the
 /// weighted mean carries counts as noise, so it can only push toward refusal.
 ///
-/// Null (no verdict) on fewer than 20 segments or a peak in that top band.
+/// A respiratory line has to stand out: the peak bin must reach 4.5x the band
+/// median. With only ~20-30 segments the median is noisy enough that pure
+/// beat-time jitter sometimes reads under the ceiling; its peak stays near
+/// 3.4x the median at worst, while an RSA line that clears the ceiling sits at
+/// 5x or more.
+///
+/// Null (no verdict) on fewer than 20 segments, a peak in that top band, or
+/// no peak standing clear of the floor.
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
@@ -164,7 +171,9 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
     if (band[k] > band[peak]) peak = k;
   }
   if (peak + kLo >= kHi - 1) return null; // ~0.477–0.5 band, see above
-  final floor = median(band)! / segs / w2;
+  final med = median(band)!;
+  if (band[peak] < 4.5 * med) return null; // no line, no exemption
+  final floor = med / segs / w2;
   final vetted = wsd / wsum, all = ssd / nd;
   // 1 − (structured share of RMSSD²); equals 2σ²/mean(d²) when stationary.
   return 1 - (vetted - 2 * floor) / math.max(vetted, all);

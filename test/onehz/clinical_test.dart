@@ -93,9 +93,25 @@ void main() {
         expect(m.value!.rmssd, isNull);
         expect(m.note, contains('rmssd_refused:acf1='));
       }
+      // Flat band: no line stands out, so no spectral verdict at all.
       expect(nnDiffNoiseShare([
         [for (var i = 1; i < white.length; i++) white[i] - white[i - 1]]
-      ])!, greaterThan(kNnDiffNoiseShareCeiling));
+      ]), isNull);
+    });
+
+    test('HRV-02: short beat-time jitter cannot pass as RSA', () {
+      // ~680 beats is just over 20 Welch segments: the band median is noisy
+      // enough that differenced jitter used to read under the ceiling.
+      for (var seed = 0; seed < 400; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        final e = [for (var i = 0; i <= 680; i++) 20 * g()];
+        final rr = [for (var i = 1; i <= 680; i++) 1333 + e[i] - e[i - 1]];
+        final h = hrvTime(rr);
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+      }
     });
 
     test('HRV-02: noisier short runs cannot dilute the noise share', () {
