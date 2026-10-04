@@ -175,6 +175,38 @@ void main() {
       expect(nocturnalRmssd(rr, ts).present, isFalse);
     });
 
+    test('HRV-02: one loud jitter burst cannot pass as RSA', () {
+      // Beat-time jitter at 5 ms with a 64-beat stretch at 20x: the burst
+      // carries most of the band power, so the averaged spectrum is in effect
+      // one or two segments and its median undershoots the floor.
+      var gated = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        final e = [
+          for (var i = 0; i <= 3000; i++)
+            5 * g() * (i >= 1500 && i < 1564 ? 20 : 1)
+        ];
+        final rr = <double>[];
+        final ts = <double>[];
+        var t = 0.0;
+        for (var i = 1; i <= 3000; i++) {
+          final v = 1333 + e[i] - e[i - 1];
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+        final h = hrvTime(rr, nnTimesMs: ts);
+        if (h.value!.diffAcf1! >= kNnDiffAcf1Floor) continue;
+        gated++;
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+      }
+      expect(gated, greaterThan(150));
+    });
+
     test('HRV-02: run-edge artifacts the Hann taper hides stay refused', () {
       // White ±5 ms, but beat 1 of every run is +120 ms: the taper barely sees
       // it, so counting it at full weight against the floor read as RSA.

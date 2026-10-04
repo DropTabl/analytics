@@ -110,8 +110,14 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// 3.4x the median at worst, while an RSA line that clears the ceiling sits at
 /// 5x or more.
 ///
-/// Null (no verdict) on fewer than 20 segments, a peak in that top band, a
-/// Nyquist bin that rivals the peak, or no peak standing clear of the floor.
+/// A short loud burst can carry most of the band power, leaving the average
+/// effectively one or two segments wide, and the median of that undershoots
+/// the floor. So the segment count that matters is the power-weighted one,
+/// (Σ P_s)² / Σ P_s², which must reach 15.
+///
+/// Null (no verdict) on fewer than 20 segments (or 15 effective), a peak in
+/// that top band, a Nyquist bin that rivals the peak, or no peak standing
+/// clear of the floor.
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
@@ -131,7 +137,7 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   ];
   final psd = List<double>.filled(kHi + 1, 0.0);
   var segs = 0, nd = 0;
-  var ssd = 0.0, wsd = 0.0, wsum = 0.0;
+  var ssd = 0.0, wsd = 0.0, wsum = 0.0, pSum = 0.0, p2Sum = 0.0;
   for (final r in diffRuns) {
     for (final d in r) {
       ssd += d * d;
@@ -151,6 +157,7 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
       }
       m /= n;
       final v = [for (var i = 0; i < n; i++) (x[s + i] - m) * w[i]];
+      var p = 0.0;
       for (var k = kLo; k <= kHi; k++) {
         final c = cosT[k - kLo], sn = sinT[k - kLo];
         var re = 0.0, im = 0.0;
@@ -159,7 +166,10 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
           im -= v[i] * sn[i];
         }
         psd[k] += re * re + im * im;
+        p += re * re + im * im;
       }
+      pSum += p;
+      p2Sum += p * p;
       segs++;
     }
     for (var i = 0; i < r.length; i++) {
@@ -169,6 +179,8 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
     }
   }
   if (segs < 20 || ssd == 0 || wsd == 0) return null;
+  // One loud stretch dominates the average: count segments by power, not number.
+  if (pSum * pSum / p2Sum < 15) return null;
   final band = psd.sublist(kLo);
   var peak = 0;
   for (var k = 1; k < band.length; k++) {
