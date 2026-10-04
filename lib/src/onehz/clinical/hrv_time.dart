@@ -93,6 +93,13 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// ~0.477–0.5 cycles/beat is refused too (HR ~40 at 20 br/min lands there):
 /// at 64 beats a Hann line that close puts its main lobe on the Nyquist bin.
 ///
+/// Diffs are weighted by the same Hann² coverage the spectrum gives them: a
+/// diff in the first or last few beats of a segment barely reaches the PSD, so
+/// counting it at full weight against the floor hid run-edge artifacts (sensor
+/// holes, dropped runs, window seams are exactly where re-lock residuals sit).
+/// Energy the spectrum never vets (edges, tails, too-short runs) above what the
+/// weighted mean carries counts as noise, so it can only push toward refusal.
+///
 /// Null (no verdict) on fewer than 20 segments or a peak in that top band.
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
@@ -103,43 +110,54 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   for (final x in w) {
     w2 += x * x;
   }
+  final cosT = [
+    for (var k = kLo; k <= kHi; k++)
+      [for (var i = 0; i < n; i++) math.cos(2 * math.pi * k * i / n)]
+  ];
+  final sinT = [
+    for (var k = kLo; k <= kHi; k++)
+      [for (var i = 0; i < n; i++) math.sin(2 * math.pi * k * i / n)]
+  ];
   final psd = List<double>.filled(kHi + 1, 0.0);
   var segs = 0, nd = 0;
-  var ssd = 0.0;
+  var ssd = 0.0, wsd = 0.0, wsum = 0.0;
   for (final r in diffRuns) {
+    for (final d in r) {
+      ssd += d * d;
+      nd++;
+    }
     // Integrate the run back to RR levels (up to a constant the mean removes).
     final x = List<double>.filled(r.length + 1, 0.0);
     for (var i = 0; i < r.length; i++) {
       x[i + 1] = x[i] + r[i];
     }
-    // mean(d²) over the same diffs the segments span, so short runs and run
-    // tails (which never reach the spectrum) can't dilute the share.
-    final covered =
-        x.length < n ? 0 : (x.length - n) ~/ (n ~/ 2) * (n ~/ 2) + n - 1;
-    for (var i = 0; i < covered; i++) {
-      ssd += r[i] * r[i];
-      nd++;
-    }
+    final cov = List<double>.filled(x.length, 0.0); // Σ w² per sample
     for (var s = 0; s + n <= x.length; s += n ~/ 2) {
       var m = 0.0;
       for (var i = 0; i < n; i++) {
         m += x[s + i];
+        cov[s + i] += w[i] * w[i];
       }
       m /= n;
+      final v = [for (var i = 0; i < n; i++) (x[s + i] - m) * w[i]];
       for (var k = kLo; k <= kHi; k++) {
+        final c = cosT[k - kLo], sn = sinT[k - kLo];
         var re = 0.0, im = 0.0;
         for (var i = 0; i < n; i++) {
-          final v = (x[s + i] - m) * w[i];
-          final a = 2 * math.pi * k * i / n;
-          re += v * math.cos(a);
-          im -= v * math.sin(a);
+          re += v[i] * c[i];
+          im -= v[i] * sn[i];
         }
         psd[k] += re * re + im * im;
       }
       segs++;
     }
+    for (var i = 0; i < r.length; i++) {
+      final c = (cov[i] + cov[i + 1]) / 2;
+      wsd += c * r[i] * r[i];
+      wsum += c;
+    }
   }
-  if (segs < 20 || ssd == 0) return null;
+  if (segs < 20 || ssd == 0 || wsd == 0) return null;
   final band = psd.sublist(kLo);
   var peak = 0;
   for (var k = 1; k < band.length; k++) {
@@ -147,7 +165,9 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   }
   if (peak + kLo >= kHi - 1) return null; // ~0.477–0.5 band, see above
   final floor = median(band)! / segs / w2;
-  return 2 * floor / (ssd / nd);
+  final vetted = wsd / wsum, all = ssd / nd;
+  // 1 − (structured share of RMSSD²); equals 2σ²/mean(d²) when stationary.
+  return 1 - (vetted - 2 * floor) / math.max(vetted, all);
 }
 
 /// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND

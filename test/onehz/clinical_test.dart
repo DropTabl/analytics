@@ -127,6 +127,32 @@ void main() {
       expect(nocturnalRmssd(rr, ts).present, isFalse);
     });
 
+    test('HRV-02: run-edge artifacts the Hann taper hides stay refused', () {
+      // White ±5 ms, but beat 1 of every run is +120 ms: the taper barely sees
+      // it, so counting it at full weight against the floor read as RSA.
+      final rnd = math.Random(13);
+      final rr = <double>[];
+      final ts = <double>[];
+      var t = 0.0;
+      for (var r = 0; r < 40; r++) {
+        t += 5000;
+        for (var i = 0; i < 100; i++) {
+          final v = 1000 + (rnd.nextDouble() - 0.5) * 10 + (i == 1 ? 120 : 0);
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull);
+      expect(nocturnalRmssd(rr, ts).present, isFalse);
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor());
+      expect(ss.present, isFalse);
+      expect(ss.note, contains('rmssd_refused:acf1='));
+    });
+
     test('HRV-02: normal-HR RSA is untouched by the jitter gate', () {
       // HR 60, 15 br/min = 4 beats/breath: ACF1 ≈ 0, never reaches the
       // spectral check.
