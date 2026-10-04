@@ -311,6 +311,122 @@ void main() {
       expect(m.value!.rmssd, closeTo(30, 2), reason: '√2·30·sin(π/4)');
     });
 
+    // 6 h at 18 br/min with beat-time jitter loud enough that the pooled
+    // spectral exemption refuses; HR 50 ± [drift] bpm over a 3 h cycle.
+    (List<double>, List<double>) slowNight(int seed, double drift, double rsa,
+        [double jitter = 60]) {
+      final rnd = math.Random(seed);
+      final rr = <double>[], ts = <double>[];
+      var t = 0.0, e0 = 0.0;
+      while (t < 6 * 3600e3) {
+        final base = 60000 / (50 + drift * math.sin(2 * math.pi * t / 10800e3));
+        final e1 = (rnd.nextDouble() - 0.5) * jitter;
+        final v = base + rsa * math.sin(2 * math.pi * 0.3 * t / 1000) + e1 - e0;
+        e0 = e1;
+        t += v;
+        rr.add(v);
+        ts.add(t);
+      }
+      return (rr, ts);
+    }
+
+    test('HRV-02: slow-heart RSA steady in Hz while HR drifts publishes', () {
+      for (var seed = 0; seed < 2; seed++) {
+        final (rr, ts) = slowNight(seed, 8, 10, 20);
+        final ss = sleepSessionWindowedRmssd(rr, ts,
+            startSec: 1, endSec: (ts.last / 1000).floor());
+        expect(ss.present, isTrue, reason: 'seed $seed');
+        expect(ss.note, contains('steady in Hz'));
+        expect(ss.confidence, 0.3);
+        expect(nocturnalRmssd(rr, ts).present, isTrue, reason: 'seed $seed');
+        expect(hrvTime(rr, nnTimesMs: ts).value!.rmssd, isNotNull);
+        // Same night with the heart rate held flat: Hz and beats coincide, so
+        // stability in Hz proves nothing and the night stays refused.
+        final (fr, ft) = slowNight(seed, 0, 10);
+        expect(
+            sleepSessionWindowedRmssd(fr, ft,
+                    startSec: 1, endSec: (ft.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+        // A real line under jitter that is most of the RMSSD (~42 of ~44 ms
+        // here, RSA alone ~13): the line is there, the number is not.
+        final (lr, lt) = slowNight(seed, 8, 10);
+        expect(
+            sleepSessionWindowedRmssd(lr, lt,
+                    startSec: 1, endSec: (lt.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+        expect(nocturnalRmssd(lr, lt).present, isFalse, reason: 'seed $seed');
+      }
+    });
+
+    test('HRV-02: slow-heart RSA with wandering breathing publishes near truth',
+        () {
+      // Real breathing is not a fixed tone: rate wanders ±2–3 br/min around
+      // 16–19, depth swings ±30–50 %, HR drifts 42–58, plus small beat-time
+      // jitter. Truth = RMSSD of the jitter-free RR.
+      for (var seed = 0; seed < 8; seed++) {
+        final rnd = math.Random(seed);
+        final br0 = 16 + 3 * rnd.nextDouble(), brA = 2 + rnd.nextDouble();
+        final dA = 0.3 + 0.2 * rnd.nextDouble(), ph = 6.28 * rnd.nextDouble();
+        final rr = <double>[], ts = <double>[], clean = <double>[];
+        var t = 0.0, phi = 0.0, e0 = 0.0, br = br0, depth = 40.0;
+        while (t < 6 * 3600e3) {
+          final hr = 50 + 8 * math.sin(2 * math.pi * t / 10800e3 + ph);
+          final c = 60000 / hr + depth * math.sin(phi);
+          final e1 = (rnd.nextDouble() - 0.5) * 40;
+          final v = c + e1 - e0;
+          e0 = e1;
+          phi += 2 * math.pi * br / 60 * c / 1000;
+          if (phi > 2 * math.pi) {
+            // Each breath its own rate and depth.
+            phi -= 2 * math.pi;
+            final g = math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+                math.cos(2 * math.pi * rnd.nextDouble());
+            br = br0 + brA * g.clamp(-2.0, 1.5);
+            depth = 40 * (1 + dA * (2 * rnd.nextDouble() - 1));
+          }
+          t += v;
+          clean.add(c);
+          rr.add(v);
+          ts.add(t);
+        }
+        var ss = 0.0;
+        for (var i = 1; i < clean.length; i++) {
+          ss += math.pow(clean[i] - clean[i - 1], 2);
+        }
+        final truth = math.sqrt(ss / (clean.length - 1));
+        final got = [
+          hrvTime(rr, nnTimesMs: ts).value!.rmssd,
+          nocturnalRmssd(rr, ts).value,
+          sleepSessionWindowedRmssd(rr, ts,
+                  startSec: 1, endSec: (ts.last / 1000).floor())
+              .value,
+        ];
+        for (final g in got) {
+          expect(g, isNotNull, reason: 'seed $seed');
+          expect(g! / truth, inInclusiveRange(1 / 1.3, 1.3),
+              reason: 'seed $seed: $g vs $truth');
+        }
+      }
+    });
+
+    test('HRV-02: beat-time jitter with a drifting HR stays refused', () {
+      for (var seed = 0; seed < 4; seed++) {
+        final (rr, ts) = slowNight(seed, 8, 0);
+        expect(hrvTime(rr, nnTimesMs: ts).value!.rmssd, isNull);
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+        expect(
+            sleepSessionWindowedRmssd(rr, ts,
+                    startSec: 1, endSec: (ts.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+      }
+    });
+
     test('HRV-02: confidence carries jitter and artifact, not beat count alone',
         () {
       // It used to be clamp(n/250, .3, .95), which published 0.95 on all 13
