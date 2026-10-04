@@ -76,6 +76,32 @@ void main() {
       expect(ss.value, closeTo(40.3, 2), reason: '√2·30·sin(0.4π)');
     });
 
+    test('HRV-02: jitter-only windows never supply the exempted headline', () {
+      // 20 loud breathing windows carry the pooled line; 30 quiet windows are
+      // pure jitter. Pooled, the night clears the exemption, but the median
+      // (and most of the mean) would be the jitter windows.
+      final rnd = math.Random(11);
+      final rr = <double>[], ts = <double>[];
+      var t = 0.0;
+      for (var w = 0; w < 50; w++) {
+        final rsa = w % 5 < 2;
+        for (var i = 0; i < 225; i++) {
+          final v = rsa
+              ? 1333 + 60 * math.sin(2 * math.pi * i / 2.5) +
+                  (rnd.nextDouble() - 0.5) * 10
+              : 1333 + (rnd.nextDouble() - 0.5) * 20;
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      final n = nocturnalRmssd(rr, ts);
+      expect(n.value, greaterThan(70), reason: 'breathing windows only');
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor() + 1);
+      expect(ss.value, greaterThan(70));
+    });
+
     test('HRV-02: long jitter stays refused through the spectral check', () {
       final rnd = math.Random(5);
       final white = <double>[

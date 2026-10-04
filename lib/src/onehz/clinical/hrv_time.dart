@@ -115,11 +115,12 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// the floor. So the segment count that matters is the power-weighted one,
 /// (Σ P_s)² / Σ P_s², which must reach 15.
 ///
-/// Null (no verdict) on fewer than 20 segments (or 15 effective), a peak in
+/// Null (no verdict) on fewer than [minSegments] segments (or 3/4 of that
+/// effective; 20/15 for a night, see [_windowClears] for one window), a peak in
 /// that top band, a Nyquist bin that rivals the peak, or no peak standing
 /// clear of the floor, or diffs on a beat-time grid coarse against their size
 /// (see [_onCoarseLattice]).
-double? nnDiffNoiseShare(List<List<double>> diffRuns) {
+double? nnDiffNoiseShare(List<List<double>> diffRuns, {int minSegments = 20}) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
     for (var i = 0; i < n; i++) 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
@@ -179,10 +180,10 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
       wsum += c;
     }
   }
-  if (segs < 20 || ssd == 0 || wsd == 0) return null;
+  if (segs < minSegments || ssd == 0 || wsd == 0) return null;
   if (_onCoarseLattice(diffRuns, ssd / nd)) return null;
   // One loud stretch dominates the average: count segments by power, not number.
-  if (pSum * pSum / p2Sum < 15) return null;
+  if (pSum * pSum / p2Sum < 0.75 * minSegments) return null;
   final band = psd.sublist(kLo);
   var peak = 0;
   for (var k = 1; k < band.length; k++) {
@@ -226,10 +227,33 @@ bool _onCoarseLattice(List<List<double>> diffRuns, double msd) {
 
 /// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND
 /// the spectrum does not show a respiratory line on a low white floor.
-bool _jitterRefused(double? acf1, List<List<double>> runs) {
+bool _jitterRefused(double? acf1, List<List<double>> runs,
+    {int minSegments = 20}) {
   if (acf1 == null || acf1 >= kNnDiffAcf1Floor) return false;
-  final share = nnDiffNoiseShare(runs);
+  final share = nnDiffNoiseShare(runs, minSegments: minSegments);
   return share == null || share >= kNnDiffNoiseShareCeiling;
+}
+
+/// One 5-min window judged on its own: a measured ACF1 at or above the floor,
+/// or its own spectral line (4 segments is what a window at HR ~40 holds).
+bool _windowClears(List<List<double>> runs) {
+  final a = nnDiffAcf1(runs);
+  return a != null && !_jitterRefused(a, runs, minSegments: 4);
+}
+
+/// The window RMSSDs a headline may use. A night that cleared the floor
+/// outright keeps them all. One that only passed through the spectral
+/// exemption proved a line somewhere in the pooled power, not in every window:
+/// quiet jitter-only windows can win the median or dilute the mean while a few
+/// loud breathing windows carry the pooled share. There every window has to
+/// clear the gate itself.
+List<double> _clearedWindows(double? nightAcf1, List<double> rmssds,
+    List<List<List<double>>> winRuns) {
+  if (nightAcf1 == null || nightAcf1 >= kNnDiffAcf1Floor) return rmssds;
+  return [
+    for (var i = 0; i < rmssds.length; i++)
+      if (_windowClears(winRuns[i])) rmssds[i]
+  ];
 }
 
 /// Confidence multiplier for a measured [acf1]: 1.0 on a smooth tachogram,
@@ -440,6 +464,7 @@ Metric<double> nocturnalRmssd(
   // passed by luck — measured, that let WHOOP 5 publish 109-116 ms from its
   // calmest-looking windows while the night pooled to −0.43/−0.51.
   final runs = <List<double>>[];
+  final perWindow = <List<List<double>>>[];
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     if (stageMaskPerSec != null) {
@@ -478,6 +503,7 @@ Metric<double> nocturnalRmssd(
     }
     if (nd < minBeatsPerWindow) continue;
     runs.addAll(winRuns);
+    perWindow.add(winRuns);
     rmssds.add(math.sqrt(ssd / nd));
   }
   final acf1 = nnDiffAcf1(runs);
@@ -495,11 +521,19 @@ Metric<double> nocturnalRmssd(
       note: 'no usable 5-min windows for nocturnal RMSSD',
     );
   }
-  final robust = median(rmssds)!;
+  final kept = _clearedWindows(acf1, rmssds, perWindow);
+  if (kept.isEmpty) {
+    return Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: '${_jitterNote(acf1!)}; no 5-min window clears it on its own',
+    );
+  }
+  final robust = median(kept)!;
   // Confidence scales with how many windows we could median over, and with the
   // measured jitter level (see [kNnDiffAcf1Floor]).
   final conf =
-      ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1)).clamp(
+      ((kept.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1)).clamp(
           // 12 ≈ 1 h
           0.3,
           0.95);
@@ -508,7 +542,7 @@ Metric<double> nocturnalRmssd(
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'robust nocturnal RMSSD = MEDIAN of ${rmssds.length} consecutive '
+    note: 'robust nocturnal RMSSD = MEDIAN of ${kept.length} consecutive '
         '5-min-window RMSSDs (REM/arousal-robust). PRV not ECG-HRV; '
         'RMSSD is quantization-sensitive at 1 Hz.',
   );
@@ -572,6 +606,7 @@ Metric<double> sleepSessionWindowedRmssd(
 
   final rmssds = <double>[];
   final runs = <List<double>>[]; // pooled jitter floor — see [nocturnalRmssd]
+  final perWindow = <List<List<double>>>[];
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     final diffRuns = [
@@ -588,6 +623,7 @@ Metric<double> sleepSessionWindowedRmssd(
     }
     if (nd == 0) continue;
     runs.addAll(diffRuns);
+    perWindow.add(diffRuns);
     rmssds.add(math.sqrt(ssd / nd));
   }
 
@@ -609,9 +645,17 @@ Metric<double> sleepSessionWindowedRmssd(
       note: 'no valid 5-min windows for sleep-session RMSSD',
     );
   }
+  final kept = _clearedWindows(acf1, rmssds, perWindow);
+  if (kept.isEmpty) {
+    return Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: '${_jitterNote(acf1!)}; no 5-min window clears it on its own',
+    );
+  }
 
-  final meanRmssd = mean(rmssds)!;
-  final conf = ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
+  final meanRmssd = mean(kept)!;
+  final conf = ((kept.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
       .clamp(0.3, 0.95);
   return Metric<double>(
     value: meanRmssd,
