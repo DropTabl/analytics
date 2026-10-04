@@ -98,6 +98,35 @@ void main() {
       ])!, greaterThan(kNnDiffNoiseShareCeiling));
     });
 
+    test('HRV-02: noisier short runs cannot dilute the noise share', () {
+      // Pure white noise, but fragmented: a few long runs at ±10 ms and many
+      // 40-beat runs (too short for the spectrum) at 3x the amplitude. The
+      // share must come from the same diffs the spectrum sees.
+      final rnd = math.Random(11);
+      final rr = <double>[];
+      final ts = <double>[];
+      var t = 0.0;
+      void run(int len, double amp) {
+        t += 5000; // sensor hole ends the run
+        for (var i = 0; i < len; i++) {
+          final v = 1000 + (rnd.nextDouble() - 0.5) * 2 * amp;
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      for (var i = 0; i < 12; i++) {
+        run(400, 10);
+      }
+      for (var i = 0; i < 150; i++) {
+        run(40, 30);
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull);
+      expect(nocturnalRmssd(rr, ts).present, isFalse);
+    });
+
     test('HRV-02: normal-HR RSA is untouched by the jitter gate', () {
       // HR 60, 15 br/min = 4 beats/breath: ACF1 ≈ 0, never reaches the
       // spectral check.

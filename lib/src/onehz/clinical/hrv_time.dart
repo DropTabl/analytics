@@ -87,10 +87,13 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// beat, and differencing a line at f gives ACF1 = cos 2πf. At a resting HR
 /// in the 40s and 18–20 breaths/min that is ~0.4 cycles/beat, ACF1 ≈ −0.8 —
 /// below the floor on a clean night, so the floor locked out slow hearts.
-/// Ceiling: a line AT Nyquist (breathing at exactly half the heart rate) is an
+/// Ceiling: a line at Nyquist (breathing at half the heart rate) is an
 /// alternation, indistinguishable from detector alternation, and stays refused.
+/// The guard is deliberately the top two bins, so a peak anywhere in
+/// ~0.477–0.5 cycles/beat is refused too (HR ~40 at 20 br/min lands there):
+/// at 64 beats a Hann line that close puts its main lobe on the Nyquist bin.
 ///
-/// Null (no verdict) on fewer than 20 segments or a peak at Nyquist.
+/// Null (no verdict) on fewer than 20 segments or a peak in that top band.
 double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
   final w = [
@@ -108,6 +111,12 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
     final x = List<double>.filled(r.length + 1, 0.0);
     for (var i = 0; i < r.length; i++) {
       x[i + 1] = x[i] + r[i];
+    }
+    // mean(d²) over the same diffs the segments span, so short runs and run
+    // tails (which never reach the spectrum) can't dilute the share.
+    final covered =
+        x.length < n ? 0 : (x.length - n) ~/ (n ~/ 2) * (n ~/ 2) + n - 1;
+    for (var i = 0; i < covered; i++) {
       ssd += r[i] * r[i];
       nd++;
     }
@@ -136,7 +145,7 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns) {
   for (var k = 1; k < band.length; k++) {
     if (band[k] > band[peak]) peak = k;
   }
-  if (peak + kLo >= kHi - 1) return null; // Nyquist alternation, see above
+  if (peak + kLo >= kHi - 1) return null; // ~0.477–0.5 band, see above
   final floor = median(band)! / segs / w2;
   return 2 * floor / (ssd / nd);
 }
