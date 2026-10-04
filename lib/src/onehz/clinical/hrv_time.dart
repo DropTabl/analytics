@@ -621,7 +621,9 @@ Metric<double> sleepSessionWindowedRmssd(
         nd++;
       }
     }
-    if (nd == 0) continue;
+    // Same floor as [nocturnalRmssd]'s minBeatsPerWindow: a window with one or
+    // two differences would otherwise weigh as much as a full one in the mean.
+    if (nd < 5) continue;
     runs.addAll(diffRuns);
     perWindow.add(diffRuns);
     rmssds.add(math.sqrt(ssd / nd));

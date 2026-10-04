@@ -885,6 +885,20 @@ void main() {
       }
       expect(t, 2);
     });
+
+    test('a NREM gap longer than the REM around it is not bridged', () {
+      // 2 + 2 epochs of REM around a 9-epoch NREM gap is 2 min of REM, not a
+      // 6.5-min episode.
+      final raw = <SleepStage>[
+        ...List.filled(100, SleepStage.nrem),
+        ...List.filled(2, SleepStage.rem),
+        ...List.filled(9, SleepStage.nrem),
+        ...List.filled(2, SleepStage.rem),
+        ...List.filled(100, SleepStage.nrem),
+      ];
+      final c = consolidateSleepStages(raw, 30);
+      expect(c.where((s) => s == SleepStage.rem).length, 0);
+    });
   });
 
   // ------------------------------------------------ sleepCyclesMetric (#6)

@@ -213,7 +213,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
       beyondUsualSpread: beyond,
       used: true,
     ));
-    raw.add(_RawItem(inp.label, contribution, beyond));
+    raw.add(_RawItem(inp.label, contribution, beyond, delta));
     wsum += inp.weight;
     wpsum += inp.weight * oriented;
     nUsable++;
@@ -236,8 +236,10 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
   // Drivers ranked by |contribution|; only NAME a driver past the SWC.
   final ranked = [...raw]..sort((a, b) => b.c.abs().compareTo(a.c.abs()));
   final drivers = <Driver>[];
+  double? topDelta;
   for (final r in ranked) {
     if (!r.beyondUsualSpread) continue; // never name a mover inside the noise
+    topDelta ??= r.delta;
     drivers.add(Driver(
       r.label,
       r.c,
@@ -245,7 +247,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
     ));
   }
 
-  final narrative = _buildNarrative(score, drivers);
+  final narrative = _buildNarrative(score, drivers, topDelta ?? 0);
 
   // Confidence reflects how many of the priority inputs were usable.
   final conf = (nUsable / inputs.length.toDouble()).clamp(0.3, 0.9);
@@ -264,20 +266,23 @@ class _RawItem {
   final String label;
   final double c; // weighted contribution
   final bool beyondUsualSpread;
-  const _RawItem(this.label, this.c, this.beyondUsualSpread);
+  final double delta; // raw value - baseline centre (NOT oriented)
+  const _RawItem(this.label, this.c, this.beyondUsualSpread, this.delta);
 }
 
-String _buildNarrative(double score, List<Driver> drivers) {
+String _buildNarrative(double score, List<Driver> drivers, double topDelta) {
   final band = score >= 70
       ? 'You\'re ready'
       : score >= 40
           ? 'A moderate day'
-          : 'Take it easier today';
+          : 'A low-readiness day';
   if (drivers.isEmpty) {
     return '$band — nothing moved beyond your normal day-to-day noise.';
   }
   final top = drivers.first;
-  final dir = top.contribution >= 0 ? 'up' : 'down';
+  // Direction of the RAW value, not the oriented contribution: a lower RHR
+  // lifts the score but is still "down".
+  final dir = topDelta >= 0 ? 'up' : 'down';
   final word = _humanLabel(top.label);
   return '$band — mainly because your $word is $dir vs your usual.';
 }

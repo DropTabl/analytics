@@ -117,17 +117,16 @@ List<AnomalyDay> multivariateAnomaly(
     final cur = _orient(feats[i]);
     // Build per-feature baseline columns (valid only) from the trailing window.
     final cols = List.generate(4, (_) => <double>[]);
-    // Aligned rows (all 4 features present) for covariance off-diagonals.
-    final rows = <List<double>>[];
+    // Oriented baseline rows, filtered to tonight's kept features below for
+    // the covariance off-diagonals.
+    final baseRows = <List<double?>>[];
     for (var j = i - 1; j >= 0; j--) {
       if (day[i] - day[j] > baselineDays) break;
       final o = _orient(feats[j]);
       for (var f = 0; f < 4; f++) {
         if (o[f] != null) cols[f].add(o[f]!);
       }
-      if (o.every((v) => v != null)) {
-        rows.add([for (final v in o) v!]);
-      }
+      baseRows.add(o);
     }
     // Which features are available BOTH tonight and with enough baseline?
     final idx = <int>[];
@@ -198,6 +197,13 @@ List<AnomalyDay> multivariateAnomaly(
     ];
 
     // Robust correlation matrix from aligned rows (standardized), regularized.
+    // A row is aligned when every KEPT feature is present; requiring all four
+    // let one sparse column (temp, resp) force the identity, so a single
+    // autonomic shift (RHR up + HRV down) was counted twice.
+    final rows = [
+      for (final o in baseRows)
+        if (keep.every((f) => o[f] != null)) [for (final v in o) v ?? 0.0]
+    ];
     final cov = _robustCorr(rows, keep, center, scale, ridge);
     final inv = _invert(cov);
     double d2;
