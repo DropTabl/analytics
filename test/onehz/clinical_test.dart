@@ -52,6 +52,265 @@ void main() {
       expect(clean.value!.pnn50, isNotNull);
     });
 
+    test('HRV-02: slow-heart RSA near Nyquist is not jitter', () {
+      // HR 45, breathing every 2.5 beats (18 br/min) — diff-ACF1 ≈ cos(0.8π)
+      // ≈ −0.8, under the floor, yet the high band is one respiratory line.
+      final rnd = math.Random(3);
+      final rr = <double>[
+        for (var i = 0; i < 4800; i++)
+          1333 + 30 * math.sin(2 * math.pi * i / 2.5) + (rnd.nextDouble() - 0.5) * 10
+      ];
+      final ts = <double>[];
+      var t = 0.0;
+      for (final v in rr) {
+        t += v;
+        ts.add(t);
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNotNull);
+      expect(nocturnalRmssd(rr, ts).present, isTrue);
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor());
+      expect(ss.present, isTrue);
+      expect(ss.value, closeTo(40.3, 2), reason: '√2·30·sin(0.4π)');
+    });
+
+    test('HRV-02: jitter-only windows never supply the exempted headline', () {
+      // 20 loud breathing windows carry the pooled line; 30 quiet windows are
+      // pure jitter. Pooled, the night clears the exemption, but the median
+      // (and most of the mean) would be the jitter windows.
+      final rnd = math.Random(11);
+      final rr = <double>[], ts = <double>[];
+      var t = 0.0;
+      for (var w = 0; w < 50; w++) {
+        final rsa = w % 5 < 2;
+        for (var i = 0; i < 225; i++) {
+          final v = rsa
+              ? 1333 + 60 * math.sin(2 * math.pi * i / 2.5) +
+                  (rnd.nextDouble() - 0.5) * 10
+              : 1333 + (rnd.nextDouble() - 0.5) * 20;
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      final n = nocturnalRmssd(rr, ts);
+      expect(n.value, greaterThan(70), reason: 'breathing windows only');
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor() + 1);
+      expect(ss.value, greaterThan(70));
+    });
+
+    test('HRV-02: long jitter stays refused through the spectral check', () {
+      final rnd = math.Random(5);
+      final white = <double>[
+        for (var i = 0; i < 4800; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      // Beat-TIME jitter: RR = base + e[i] − e[i−1], ACF1 ≈ −2/3, high-band
+      // power rising to Nyquist rather than flat.
+      final e = [for (var i = 0; i <= 4800; i++) (rnd.nextDouble() - 0.5) * 60];
+      final timing = [for (var i = 1; i <= 4800; i++) 1333 + e[i] - e[i - 1]];
+      // Strict alternation is a line AT Nyquist — refused, not called RSA.
+      final alt = [for (var i = 0; i < 4800; i++) 1333.0 + (i.isEven ? 30 : -30)];
+      for (final s in [white, timing, alt]) {
+        final m = hrvTime(s);
+        expect(m.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+        expect(m.value!.rmssd, isNull);
+        expect(m.note, contains('rmssd_refused:acf1='));
+      }
+      // Flat band: no line stands out, so no spectral verdict at all.
+      expect(nnDiffNoiseShare([
+        [for (var i = 1; i < white.length; i++) white[i] - white[i - 1]]
+      ]), isNull);
+    });
+
+    test('HRV-02: short beat-time jitter cannot pass as RSA', () {
+      // ~680 beats is just over 20 Welch segments: the band median is noisy
+      // enough that differenced jitter used to read under the ceiling.
+      for (var seed = 0; seed < 400; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        final e = [for (var i = 0; i <= 680; i++) 20 * g()];
+        final rr = [for (var i = 1; i <= 680; i++) 1333 + e[i] - e[i - 1]];
+        final h = hrvTime(rr);
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+      }
+    });
+
+    test('HRV-02: alternation that slips phase cannot pass as RSA', () {
+      // ±30 ms alternation that holds sign on 20% of beats: a hump centred on
+      // Nyquist rather than a line at it, so its Welch peak often lands below
+      // the top-two-bin guard.
+      for (var seed = 0; seed < 100; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        var s = 1.0;
+        final rr = <double>[];
+        final ts = <double>[];
+        var t = 0.0;
+        for (var i = 0; i < 1000; i++) {
+          if (rnd.nextDouble() >= 0.2) s = -s;
+          final v = 1333 + s * 30 + 5 * g();
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+        expect(hrvTime(rr, nnTimesMs: ts).value!.rmssd, isNull,
+            reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+        expect(
+            sleepSessionWindowedRmssd(rr, ts,
+                    startSec: 1, endSec: (t / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+      }
+    });
+
+    test('HRV-02: noisier short runs cannot dilute the noise share', () {
+      // Pure white noise, but fragmented: a few long runs at ±10 ms and many
+      // 40-beat runs (too short for the spectrum) at 3x the amplitude. The
+      // share must come from the same diffs the spectrum sees.
+      final rnd = math.Random(11);
+      final rr = <double>[];
+      final ts = <double>[];
+      var t = 0.0;
+      void run(int len, double amp) {
+        t += 5000; // sensor hole ends the run
+        for (var i = 0; i < len; i++) {
+          final v = 1000 + (rnd.nextDouble() - 0.5) * 2 * amp;
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      for (var i = 0; i < 12; i++) {
+        run(400, 10);
+      }
+      for (var i = 0; i < 150; i++) {
+        run(40, 30);
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull);
+      expect(nocturnalRmssd(rr, ts).present, isFalse);
+    });
+
+    test('HRV-02: one loud jitter burst cannot pass as RSA', () {
+      // Beat-time jitter at 5 ms with a 64-beat stretch at 20x: the burst
+      // carries most of the band power, so the averaged spectrum is in effect
+      // one or two segments and its median undershoots the floor.
+      var gated = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        final e = [
+          for (var i = 0; i <= 3000; i++)
+            5 * g() * (i >= 1500 && i < 1564 ? 20 : 1)
+        ];
+        final rr = <double>[];
+        final ts = <double>[];
+        var t = 0.0;
+        for (var i = 1; i <= 3000; i++) {
+          final v = 1333 + e[i] - e[i - 1];
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+        final h = hrvTime(rr, nnTimesMs: ts);
+        if (h.value!.diffAcf1! >= kNnDiffAcf1Floor) continue;
+        gated++;
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+      }
+      expect(gated, greaterThan(150));
+    });
+
+    test('HRV-02: run-edge artifacts the Hann taper hides stay refused', () {
+      // White ±5 ms, but beat 1 of every run is +120 ms: the taper barely sees
+      // it, so counting it at full weight against the floor read as RSA.
+      final rnd = math.Random(13);
+      final rr = <double>[];
+      final ts = <double>[];
+      var t = 0.0;
+      for (var r = 0; r < 40; r++) {
+        t += 5000;
+        for (var i = 0; i < 100; i++) {
+          final v = 1000 + (rnd.nextDouble() - 0.5) * 10 + (i == 1 ? 120 : 0);
+          t += v;
+          rr.add(v);
+          ts.add(t);
+        }
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNull);
+      expect(nocturnalRmssd(rr, ts).present, isFalse);
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor());
+      expect(ss.present, isFalse);
+      expect(ss.note, contains('rmssd_refused:acf1='));
+    });
+
+    test('HRV-02: beat times on a coarse grid cannot pass as RSA', () {
+      // True RR ≈ 1013 ± 2 ms (RMSSD ~3), beat times rounded to 40 ms: RR
+      // flips between 1000 and 1040, a sawtooth line at 0.325 cycles/beat.
+      for (var seed = 0; seed < 6; seed++) {
+        final rnd = math.Random(seed);
+        double g() =>
+            math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+            math.cos(2 * math.pi * rnd.nextDouble());
+        var t = 0.0;
+        final tq = <double>[];
+        for (var i = 0; i <= 2400; i++) {
+          t += 1013 + 2 * g();
+          tq.add((t / 40).roundToDouble() * 40);
+        }
+        final rr = [for (var i = 1; i < tq.length; i++) tq[i] - tq[i - 1]];
+        final ts = tq.sublist(1);
+        final h = hrvTime(rr, nnTimesMs: ts);
+        expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+        expect(h.value!.rmssd, isNull, reason: 'seed $seed');
+        expect(nocturnalRmssd(rr, ts).present, isFalse, reason: 'seed $seed');
+        expect(
+            sleepSessionWindowedRmssd(rr, ts,
+                    startSec: 1, endSec: (ts.last / 1000).floor())
+                .present,
+            isFalse,
+            reason: 'seed $seed');
+      }
+      // Whole-ms RR is a lattice too, but far finer than the RSA it carries.
+      final rnd = math.Random(3);
+      final rr = <double>[
+        for (var i = 0; i < 4800; i++)
+          (1333 +
+                  30 * math.sin(2 * math.pi * i / 2.5) +
+                  (rnd.nextDouble() - 0.5) * 10)
+              .roundToDouble()
+      ];
+      expect(hrvTime(rr).value!.rmssd, isNotNull);
+    });
+
+    test('HRV-02: normal-HR RSA is untouched by the jitter gate', () {
+      // HR 60, 15 br/min = 4 beats/breath: ACF1 ≈ 0, never reaches the
+      // spectral check.
+      final rnd = math.Random(9);
+      final rr = <double>[
+        for (var i = 0; i < 2400; i++)
+          1000 + 30 * math.sin(2 * math.pi * i / 4) + (rnd.nextDouble() - 0.5) * 10
+      ];
+      final m = hrvTime(rr);
+      expect(m.value!.diffAcf1!, greaterThan(kNnDiffAcf1Floor));
+      expect(m.value!.rmssd, closeTo(30, 2), reason: '√2·30·sin(π/4)');
+    });
+
     test('HRV-02: confidence carries jitter and artifact, not beat count alone',
         () {
       // It used to be clamp(n/250, .3, .95), which published 0.95 on all 13
