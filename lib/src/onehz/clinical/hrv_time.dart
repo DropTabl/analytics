@@ -1043,13 +1043,20 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     // The session-wide ratio above can be diluted below the ceiling by a gap
     // elsewhere in the night while one stretch holds every beat twice. Each
     // window is judged on its own too: its beats cannot bank more beat-time
-    // than the window has seconds (one beat's overhang aside). Dropped, not
-    // averaged in.
+    // than the window has seconds — the session's last window may be cut
+    // short by [endSec] — plus its earliest beat's own interval, which began
+    // before its end stamp (as in [rrCoverage]). Dropped, not averaged in.
+    final winRr = buckets[idx]!, winTs = bucketsTs[idx]!;
+    final winStart = startSec + idx * windowSec;
+    final winSec = math.min(winStart + windowSec, endSec) - winStart;
     var bankedMs = 0.0;
-    for (final v in buckets[idx]!) {
-      if (_rrCoverageCounts(v)) bankedMs += v;
+    var lo = 0;
+    for (var i = 0; i < winRr.length; i++) {
+      if (winTs[i] < winTs[lo]) lo = i;
+      if (_rrCoverageCounts(winRr[i])) bankedMs += winRr[i];
     }
-    if (bankedMs > kRrCoverageCeiling * windowSec * 1000) {
+    final overhangMs = _rrCoverageCounts(winRr[lo]) ? winRr[lo] : 0.0;
+    if (bankedMs > kRrCoverageCeiling * (winSec * 1000 + overhangMs)) {
       overCountedWindows++;
       continue;
     }

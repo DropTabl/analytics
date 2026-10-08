@@ -675,6 +675,38 @@ void main() {
       expect(only.note, startsWith('rr_overcount'));
     });
 
+    test('a duplicated tail in the session\'s short last window is caught',
+        () {
+      // 4 h of honest beats, a 2 h gap, then 2 min with every beat stored
+      // twice, and the session ends 2 min into that last 5-min window. The
+      // tail banks ~240 s — under 110 % of a full window, but twice the time
+      // its window actually has.
+      final clean = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 14400);
+      final ts = beatEnds(clean, t0Ms: 1e12);
+      final startSec = (ts.first / 1000).floor();
+      final tailNn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 120);
+      final tailTs = beatEnds(tailNn, t0Ms: (startSec + 72 * 300 + 1) * 1000.0);
+      final rr = [...clean, for (final v in tailNn) ...[v, v]];
+      final t = [...ts, for (final x in tailTs) ...[x, x]];
+      final endSec = (t.last / 1000).ceil() + 1;
+      expect(endSec - (startSec + 72 * 300), lessThan(150));
+      expect(rrCoverage(rr, t)!.overCounted, isFalse,
+          reason: 'the gap dilutes the night-wide ratio');
+      final honest = sleepSessionRmssdDetail(clean, ts,
+          startSec: startSec, endSec: endSec);
+      final d = sleepSessionRmssdDetail(rr, t,
+          startSec: startSec, endSec: endSec);
+      expect(d.present, isTrue, reason: d.note);
+      expect(d.value!.overCountedWindows, 1);
+      expect(d.value!.windows, honest.value!.windows);
+      expect(d.value!.rmssd, honest.value!.rmssd);
+      // The same tail stored once is honest beat-time and stays in.
+      final once = sleepSessionRmssdDetail([...clean, ...tailNn], [...ts, ...tailTs],
+          startSec: startSec, endSec: endSec);
+      expect(once.value!.overCountedWindows, 0);
+      expect(once.value!.windows, honest.value!.windows + 1);
+    });
+
     test('coverage does not depend on the order the beats arrive in', () {
       final rr = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 1200);
       final ts = beatEnds(rr, t0Ms: 1e12);
