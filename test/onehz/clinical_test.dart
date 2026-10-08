@@ -563,6 +563,23 @@ void main() {
         for (var i = 0; i < 1200; i++) (i + 1) * 1000.0 + (i >= 600 ? 1.2e6 : 0)
       ];
       expect(rrCoverage(rr, ts)!.coverage, closeTo(0.5, 1e-9));
+      // A real night with a 30-min strap-off gap: every estimator the
+      // coverage reaches still publishes.
+      final nn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 3600);
+      final t0 = beatEnds(nn.sublist(0, 1800), t0Ms: 1e12);
+      final t1 = beatEnds(nn.sublist(1800), t0Ms: t0.last + 1800e3);
+      final t = [...t0, ...t1];
+      final c = rrCoverage(nn, t)!;
+      expect(c.coverage, lessThan(0.7));
+      final h = hrvTime(nn, nnTimesMs: t, coverage: c);
+      expect(h.value!.rmssd, isNotNull, reason: h.note);
+      final n = nocturnalRmssd(nn, t, coverage: c);
+      expect(n.present, isTrue, reason: n.note);
+      final d = sleepSessionRmssdDetail(nn, t,
+          startSec: (t.first / 1000).floor(),
+          endSec: (t.last / 1000).ceil() + 1);
+      expect(d.present, isTrue, reason: d.note);
+      expect(d.value!.rrCoverage!, lessThan(0.7));
     });
 
     test('the headline refuses an over-counted session', () {
@@ -717,6 +734,15 @@ void main() {
           [for (final i in idx) rr[i]], [for (final i in idx) ts[i]])!;
       expect(shuffled.coverage, closeTo(sorted.coverage, 1e-12));
       expect(shuffled.spanSec, closeTo(sorted.spanSec, 1e-9));
+      // Exact (ts, rr) repeats are counted wherever they sit.
+      final dupRr = [for (final v in rr) ...[v, v]];
+      final dupTs = [for (final x in ts) ...[x, x]];
+      final dIdx = [for (var i = 0; i < dupRr.length; i++) i]
+        ..shuffle(math.Random(2));
+      final dupShuffled = rrCoverage(
+          [for (final i in dIdx) dupRr[i]], [for (final i in dIdx) dupTs[i]])!;
+      expect(rrCoverage(dupRr, dupTs)!.duplicateBeats, 1200);
+      expect(dupShuffled.duplicateBeats, 1200);
     });
 
     test('the nightly HRV shape is absent on an over-counted stream', () {

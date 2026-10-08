@@ -504,8 +504,9 @@ class RrCoverage {
   /// Intervals outside 300–2400 ms: counted, never summed.
   final int implausibleBeats;
 
-  /// Exact (ts, rr) repeats of the previous beat. A DIAGNOSTIC only: on
-  /// whole-second stamps two equal beats in one record repeat legitimately.
+  /// Exact (ts, rr) repeats of an earlier beat, wherever they sit in the
+  /// input. A DIAGNOSTIC only: on whole-second stamps two equal beats in one
+  /// record repeat legitimately.
   final int duplicateBeats;
   const RrCoverage({
     required this.coverage,
@@ -548,6 +549,7 @@ RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
   var sum = 0.0;
   var implausible = 0;
   var dup = 0;
+  final seen = <(double, double)>{};
   for (var i = 0; i < rrMs.length; i++) {
     final v = rrMs[i];
     if (_rrCoverageCounts(v)) {
@@ -555,7 +557,7 @@ RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
     } else {
       implausible++;
     }
-    if (i > 0 && v == rrMs[i - 1] && rrTsMs[i] == rrTsMs[i - 1]) dup++;
+    if (!seen.add((rrTsMs[i], v))) dup++;
   }
   final sumSec = sum / 1000.0;
   return RrCoverage(
@@ -936,7 +938,7 @@ class SessionRmssd {
   final double rmssd; // ms — the headline
   final int windows; // 5-min windows that contributed
   final int overCountedWindows; // windows dropped for more beat-time than time
-  final int thinWindows; // windows dropped for 1..floor−1 differences
+  final int thinWindows; // windows dropped for 0..floor−1 differences
   final int minDiffsPerWindow; // the floor, which travels with the number
   final double? diffAcf1; // pooled over the session's windows
   final double? rrCoverage; // [RrCoverage.coverage] of the session's beats
@@ -971,9 +973,10 @@ class SessionRmssd {
 /// ([kMinDiffsPerRmssdWindow]): an unweighted mean let a window of a handful of
 /// differences across an arousal or a dropout edge count as much as a full
 /// window of ~300, and those thin windows cluster where the signal is
-/// disturbed, so the bias was upward. Thin windows are counted
-/// ([SessionRmssd.thinWindows]), not silently lost, and contribute nothing to
-/// the jitter verdict either. This is intentionally
+/// disturbed, so the bias was upward. Thin windows — 0 to
+/// [minDiffsPerWindow] − 1 differences, including one the cleaner left with
+/// none — are counted ([SessionRmssd.thinWindows]), not silently lost, and
+/// contribute nothing to the jitter verdict either. This is intentionally
 /// distinct from [nocturnalRmssd], which uses cleaned NN +
 /// median-of-windows robustness.
 ///
