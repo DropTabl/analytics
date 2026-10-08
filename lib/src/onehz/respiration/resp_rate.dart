@@ -246,6 +246,9 @@ Metric<RespEstimate> rsaRespRate(
   final peakHz = <double>[]; // the same peaks in Hz, index-aligned
   final peakPwr = <double>[]; // their spectral power, index-aligned
   var atCeiling = 0;
+  // The ceilings those sub-windows peaked at, br/min — their own, which
+  // move with heart rate; not the whole input's.
+  var ceilingLo = double.infinity, ceilingHi = 0.0;
   var belowBand = 0;
   var thin = 0;
   var gappy = 0;
@@ -297,6 +300,8 @@ Metric<RespEstimate> rsaRespRate(
     // rate: reporting the edge would publish the ceiling as a measurement.
     if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
       atCeiling++;
+      ceilingLo = math.min(ceilingLo, segHi * 60);
+      ceilingHi = math.max(ceilingHi, segHi * 60);
       continue;
     }
     peaks.add(pk * 60.0);
@@ -315,8 +320,12 @@ Metric<RespEstimate> rsaRespRate(
       ),
       (
         atCeiling,
-        '$atCeiling of $total sub-windows peaked at/above the resolvable '
-            'ceiling (${round6(hiHz * 60)} br/min)'
+        atCeiling == 0
+            ? ''
+            : '$atCeiling of $total sub-windows peaked at/above their '
+                'resolvable ceiling (${round6(ceilingLo)}'
+                '${ceilingHi > ceilingLo ? '–${round6(ceilingHi)}' : ''} '
+                'br/min)'
       ),
       (
         gappy,

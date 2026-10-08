@@ -320,6 +320,17 @@ void main() {
       final s = gappyRsaNight(7, hours: 1, dropouts: [
         for (var k = 0; k < 4; k++) (k * 0.25 + 0.05, k * 0.25 + 0.25)
       ]);
+      // The fixture is what it says: four bursts of ~3 min, ~12 min of beats.
+      final bursts = <List<double>>[[s.t.first, s.t.first]];
+      for (final x in s.t.skip(1)) {
+        if (x - bursts.last[1] > 60e3) bursts.add([x, x]);
+        bursts.last[1] = x;
+      }
+      expect(bursts, hasLength(4));
+      for (final b in bursts) {
+        expect((b[1] - b[0]) / 1000, inInclusiveRange(170, 185));
+      }
+      expect(s.rr.fold<double>(0, (a, v) => a + v) / 60e3, closeTo(12, 0.5));
       final c = correctRr(s.rr, rrTsMs: s.t);
       final m =
           rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
@@ -367,6 +378,59 @@ void main() {
       expect(m.value!.subwindows, 46);
       expect(m.value!.usableSubwindows, 46,
           reason: 'every sub-window is ≥ 80 % covered and resolvable');
+    });
+
+    test('RSA: sub-windows whose own heart rate is below the band are dropped',
+        () {
+      // 1.4 h at 56 bpm, then 0.6 h at 40 bpm (Nyquist 20 br/min, below the
+      // top of the HF band). The whole input's median clears the band; the
+      // slow stretch's sub-windows do not, and must not be used.
+      final a = gappyRsaNight(5, hrBpm: 56, hours: 1.4, resp0Brpm: 15,
+          resp1Brpm: 15);
+      final b = gappyRsaNight(6, hrBpm: 40, hours: 0.6, resp0Brpm: 15,
+          resp1Brpm: 15);
+      final rr = [...a.rr, ...b.rr];
+      final t = [...a.t, for (final x in b.t) a.t.last + x];
+      final c = correctRr(rr, rrTsMs: t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.brpm!, closeTo(15.0, 1.0));
+      expect(m.value!.subwindows! - m.value!.usableSubwindows!,
+          greaterThanOrEqualTo(10),
+          reason: 'the 40 bpm stretch holds ~13 sub-windows');
+    });
+
+    test('RSA: the at-ceiling note names the rejecting sub-windows\' own '
+        'ceilings', () {
+      // A beat-to-beat alternation sits exactly at each sub-window's own
+      // Nyquist, so every sub-window peaks at its ceiling: ~26 br/min in the
+      // 52 bpm hour, ~29 in the 58 bpm hour (a 15-min gap between them). The
+      // whole input's ceiling (~28) is neither.
+      final rnd = math.Random(4);
+      final nn = <double>[], t = <double>[];
+      var tMs = 0.0;
+      for (final hr in [52.0, 58.0]) {
+        if (tMs > 0) tMs += 900e3;
+        final end = tMs + 3600e3;
+        while (tMs < end) {
+          final v = 60000 / hr +
+              (nn.length.isEven ? 30 : -30) +
+              (rnd.nextDouble() - 0.5) * 0.5;
+          tMs += v;
+          nn.add(v);
+          t.add(tMs);
+        }
+      }
+      final m = rsaRespRate(nn, t, artifactFraction: 0);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.note, contains('at/above'));
+      final nums = RegExp(r'ceiling \(([0-9.]+)(?:–([0-9.]+))? br/min\)')
+          .firstMatch(m.note!);
+      expect(nums, isNotNull, reason: m.note);
+      // The low end comes from the 52 bpm hour, the high end from the 58.
+      expect(double.parse(nums!.group(1)!), inInclusiveRange(25.0, 27.0));
+      expect(double.parse(nums.group(2) ?? '0'), inInclusiveRange(28.5, 30.0));
     });
 
     test('RSA: confidence scales with usable sub-windows', () {
