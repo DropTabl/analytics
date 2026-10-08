@@ -210,11 +210,11 @@ void main() {
       // Wake minutes set the baseline. Guessing one fabricates the subtraction
       // and silently mis-scores every partial-wear day.
       expect(
-          strainScoreMetric(300, wakeMinutes: null, quietHrr: quietWakingHrr)
+          strainScoreMetric(300, wakeMinutes: null, quietHrr: quietWakingHrr, quietSettled: true)
               .present,
           isFalse);
       expect(
-          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr)
+          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true)
               .present,
           isFalse);
     });
@@ -222,15 +222,28 @@ void main() {
     test('abstains without a quiet-waking level rather than assuming one', () {
       // The whole of MOT-03: a stand-in level is what billed being awake as
       // training load. No level, no score.
-      final m = strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: null);
+      final m = strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: null, quietSettled: true);
       expect(m.present, isFalse);
       expect(m.note, contains('quiet-waking'));
       expect(m.inputs_used, contains('quiet_waking_hrr'));
     });
 
+    test('a calibrating quiet level lowers confidence and says so', () {
+      // Same disclosure as the live scorer: fewer than a week of days behind
+      // the level is a real but wider measurement. The value is unchanged.
+      final settled = strainScoreMetric(392.9,
+          wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true);
+      final cal = strainScoreMetric(392.9,
+          wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: false);
+      expect(cal.value, settled.value);
+      expect(cal.confidence, lessThan(settled.confidence));
+      expect(cal.note, contains('calibrating'));
+      expect(settled.note, isNot(contains('calibrating')));
+    });
+
     test('present and ESTIMATE-tier with every input', () {
       final m =
-          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr);
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true);
       expect(m.present, isTrue);
       expect(m.tier, Tier.estimate);
       expect(m.value, greaterThan(14.0));

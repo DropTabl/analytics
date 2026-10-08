@@ -304,11 +304,14 @@ double strainFromNetTrimp(double net) {
 /// missing, non-finite, or out of range: the baseline
 /// subtraction is meaningless without a wake window, guessing one silently
 /// mis-scores every partial-wear day, and a stand-in quiet level is what scored
-/// a day with no activity in it at 12/21 (MOT-03).
+/// a day with no activity in it at 12/21 (MOT-03). [quietSettled] as in
+/// [strainScoreFromSeries]: false lowers confidence and says "calibrating",
+/// never the value — required for the same reason.
 Metric<double> strainScoreMetric(
   double? trimp, {
   required double? wakeMinutes,
   required double? quietHrr,
+  required bool quietSettled,
   bool female = false,
 }) {
   const inputs = ['trimp', 'wake_minutes', 'quiet_waking_hrr'];
@@ -356,11 +359,14 @@ Metric<double> strainScoreMetric(
   return Metric<double>(
     value: strainScore(trimp,
         wakeMinutes: wakeMinutes, quietHrr: quietHrr, female: female),
-    confidence: 0.6,
+    confidence: quietSettled ? 0.6 : 0.45,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'headline 0–21 strain = log map of TRIMP earned above the '
-        'quiet-waking baseline; wrist-HR estimate',
+    note: quietSettled
+        ? 'headline 0–21 strain = log map of TRIMP earned above the '
+            'quiet-waking baseline; wrist-HR estimate'
+        : 'calibrating: quiet-waking level from fewer than '
+            '$quietHrrSettledDays days',
   );
 }
 
@@ -586,7 +592,10 @@ class QuietLevel {
 ///
 /// [priorDailyLevels] must be strictly BEFORE the day being scored, oldest →
 /// newest: scoring a day against its own median would subtract its own living
-/// (and, on a walking day, its own effort) from itself.
+/// (and, on a walking day, its own effort) from itself. Each must already be
+/// an eligible day — [dailyQuietWakingHrr] with `minMinutes:`
+/// [quietHrrTraitMinMinutes] — since a bare level carries no coverage to
+/// check here; the caller that persists the daily levels enforces it.
 ///
 /// COLD START ABSTAINS. Below [quietHrrMinDays] valid days this is absent with
 /// the `need_baseline` grammar, never [quietWakingHrr]: that constant is a
