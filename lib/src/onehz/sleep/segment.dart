@@ -801,7 +801,11 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
     }
     final last = out.removeLast();
     final gap = session.start - last.end;
-    if (gap >= 0 && gap <= bridgeGapSec) {
+    // Individual runs already obey this cap; the combined span must too.
+    final combinedSpan = math.max(last.end, session.end) - last.start;
+    if (gap >= 0 &&
+        gap <= bridgeGapSec &&
+        combinedSpan <= AdvancedSleepStager.maxMainSleepSpanS) {
       out.add(
         _SleepGroup(
           sessions: [...last.sessions, session],
